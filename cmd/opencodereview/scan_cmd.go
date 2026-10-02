@@ -15,6 +15,8 @@ import (
 	"github.com/alibaba/open-code-review/internal/config/template"
 	"github.com/alibaba/open-code-review/internal/llm"
 	"github.com/alibaba/open-code-review/internal/llmloop"
+	"github.com/alibaba/open-code-review/internal/model"
+	"github.com/alibaba/open-code-review/internal/progress"
 	"github.com/alibaba/open-code-review/internal/scan"
 	"github.com/alibaba/open-code-review/internal/session"
 	"github.com/alibaba/open-code-review/internal/telemetry"
@@ -33,6 +35,7 @@ type scanOptions struct {
 	outputFormat          string
 	audience              string
 	outputPath            string
+	noTUI                 bool
 	background            string
 	concurrency           int
 	concurrentTaskTimeout int
@@ -234,16 +237,47 @@ func executeScan(opts scanOptions) (retErr error) {
 
 	ctx, span := telemetry.StartSpan(telemetry.ContextWithTraceParentFromEnv(context.Background()), "scan.run")
 	defer span.End()
+
+	// The run gets its own cancellable context so the dashboard can hand a
+	// ctrl+c back to the pipeline. Raw mode clears ISIG, so without this the
+	// key press would reach the dashboard and nothing else.
+	ctx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+
+	// Same live dashboard as review, and for the same reason: a full-repo scan
+	// dispatches per-file work for a long time, and the caller has no other way
+	// to tell a slow scan from a stuck one.
+	runner := progress.Start(progress.Options{
+		Title:           "scan",
+		Repo:            cc.RepoDir,
+		Model:           rt.Model,
+		Provider:        rt.Provider,
+		Audience:        opts.audience,
+		MachineReadable: isMachineReadable(opts.outputFormat),
+		Disabled:        opts.noTUI,
+		Color:           colorOn(),
+		Cancel:          cancelRun,
+		Tokens: func() (int64, int64) {
+			return ag.TotalInputTokens(), ag.TotalOutputTokens()
+		},
+		Session: func() string {
+			return ag.SessionID()
+		},
+	})
+	defer runner.Stop()
+
 	var traceID string
 	if telemetry.IsEnabled() {
 		traceID = telemetry.TraceIDFromContext(ctx)
 		if !isMachineReadable(opts.outputFormat) {
-			fmt.Fprintf(os.Stderr, "[ocr] TraceID: %s\n", traceID)
+			fmt.Fprintf(progress.ErrWriter(), "[ocr] TraceID: %s\n", traceID)
 		}
 	}
 	startTime := time.Now()
 
-	comments, err := ag.Run(ctx)
+	comments, err := progress.During(runner, func() ([]model.LlmComment, error) {
+		return ag.Run(ctx)
+	})
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		span.RecordError(err)
