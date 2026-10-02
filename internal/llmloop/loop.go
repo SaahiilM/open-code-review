@@ -16,8 +16,8 @@ import (
 	"github.com/alibaba/open-code-review/internal/diff"
 	"github.com/alibaba/open-code-review/internal/llm"
 	"github.com/alibaba/open-code-review/internal/model"
+	"github.com/alibaba/open-code-review/internal/progress"
 	"github.com/alibaba/open-code-review/internal/session"
-	"github.com/alibaba/open-code-review/internal/stdout"
 	"github.com/alibaba/open-code-review/internal/telemetry"
 	"github.com/alibaba/open-code-review/internal/tool"
 	"github.com/google/uuid"
@@ -105,12 +105,19 @@ type Runner struct {
 	totalOutputTokens     int64
 	totalCacheReadTokens  int64
 	totalCacheWriteTokens int64
-	warningsMu            sync.Mutex
-	warnings              []AgentWarning
-	toolCallsMu           sync.Mutex
-	toolCalls             map[string]int64
-	toolCallSequence      int64
-	toolFailures          []ToolFailureDetail
+	// byTask breaks the same usage down per taskKey, so a caller running
+	// several units of work concurrently can attribute tokens to the one that
+	// spent them. The process-wide counters above cannot answer that: with N
+	// groups in flight, a snapshot delta around one group would also capture
+	// every other group's calls.
+	byTaskMu         sync.Mutex
+	byTask           map[string]*TaskUsage
+	warningsMu       sync.Mutex
+	warnings         []AgentWarning
+	toolCallsMu      sync.Mutex
+	toolCalls        map[string]int64
+	toolCallSequence int64
+	toolFailures     []ToolFailureDetail
 	// toolFailureStreak counts each (taskKey, toolName) pair's consecutive
 	// failures; see tool_failure_streak.go.
 	toolFailureStreak toolFailureStreakState
@@ -251,6 +258,56 @@ func (r *Runner) recordToolFailure(number int64, name, taskKey, errMsg string,
 	}
 }
 
+// TaskUsage is the token usage attributed to one unit of work.
+type TaskUsage struct {
+	InputTokens  int64
+	OutputTokens int64
+}
+
+// recordTaskUsage attributes a response's usage to one taskKey. It is called
+// at every point where the process-wide counters are updated, so the two
+// breakdowns can never disagree about the total.
+func (r *Runner) recordTaskUsage(taskKey string, u *llm.UsageInfo) {
+	if u == nil || taskKey == "" {
+		return
+	}
+	r.byTaskMu.Lock()
+	defer r.byTaskMu.Unlock()
+	if r.byTask == nil {
+		r.byTask = make(map[string]*TaskUsage)
+	}
+	t := r.byTask[taskKey]
+	if t == nil {
+		t = &TaskUsage{}
+		r.byTask[taskKey] = t
+	}
+	t.InputTokens += u.PromptTokens
+	t.OutputTokens += u.CompletionTokens
+
+	// Publish after releasing the map lock, carrying the cumulative totals for
+	// this task rather than the delta: the dashboard updates a row's running
+	// total, and a delta would need it to sum deltas itself.
+	progress.Publish(progress.Event{
+		Kind:         progress.KindUsage,
+		Group:        taskKey,
+		InputTokens:  t.InputTokens,
+		OutputTokens: t.OutputTokens,
+	})
+}
+
+// UsageForTask returns the tokens one taskKey has spent, and whether it has
+// spent any. A task that has not been seen reports false rather than a zero
+// total, so a caller can tell "no usage recorded" from "genuinely zero".
+func (r *Runner) UsageForTask(taskKey string) (TaskUsage, bool) {
+	r.byTaskMu.Lock()
+	defer r.byTaskMu.Unlock()
+	t, ok := r.byTask[taskKey]
+	if !ok {
+		return TaskUsage{}, false
+	}
+	return *t, true
+}
+
 // RecordUsage adds the prompt/completion/cache tokens reported by an LLM
 // response to the runner's aggregate counters. Used by callers (plan phase
 // in agent / future scan phases) that perform their own LLM calls outside
@@ -263,6 +320,13 @@ func (r *Runner) RecordUsage(u *llm.UsageInfo) {
 	atomic.AddInt64(&r.totalOutputTokens, u.CompletionTokens)
 	atomic.AddInt64(&r.totalCacheReadTokens, u.CacheReadTokens)
 	atomic.AddInt64(&r.totalCacheWriteTokens, u.CacheWriteTokens)
+}
+
+// RecordUsageFor is RecordUsage with the task attribution the live dashboard
+// needs. Callers that already know their taskKey should prefer it.
+func (r *Runner) RecordUsageFor(taskKey string, u *llm.UsageInfo) {
+	r.RecordUsage(u)
+	r.recordTaskUsage(taskKey, u)
 }
 
 // CollectPendingComments awaits any async comment-processing workers and
@@ -443,6 +507,7 @@ func (r *Runner) RunMainTask(ctx context.Context, messages []llm.Message, taskKe
 			atomic.AddInt64(&r.totalOutputTokens, resp.Usage.CompletionTokens)
 			atomic.AddInt64(&r.totalCacheReadTokens, resp.Usage.CacheReadTokens)
 			atomic.AddInt64(&r.totalCacheWriteTokens, resp.Usage.CacheWriteTokens)
+			r.recordTaskUsage(taskKey, resp.Usage)
 		}
 		telemetry.RecordLLMResult(llmSpan, duration, totalTokens, nil)
 		llmSpan.End()
@@ -452,7 +517,7 @@ func (r *Runner) RunMainTask(ctx context.Context, messages []llm.Message, taskKe
 		calls := resp.ToolCalls()
 
 		if len(calls) == 0 {
-			fmt.Fprintf(stdout.Writer(), "[ocr] No tool calls parsed for %s, retrying...\n", taskKey)
+			progress.Noticef("No tool calls parsed for %s, retrying...\n", taskKey)
 			messages = append(messages, llm.NewTextMessage("user", "You did not successfully call any tools. Please try again or use task_done if finished."))
 			native := resp.Native()
 			reasoning := resp.ReasoningContent()
@@ -503,18 +568,18 @@ func (r *Runner) RunMainTask(ctx context.Context, messages []llm.Message, taskKe
 		if !hasValidResult {
 			consecutiveEmptyRounds++
 			if consecutiveEmptyRounds >= maxConsecutiveEmptyRounds {
-				fmt.Fprintf(stdout.Writer(), "[ocr] Too many empty retries for %s, stopping.\n", taskKey)
+				progress.Noticef("Too many empty retries for %s, stopping.\n", taskKey)
 				stop = StopEmptyRounds
 				break
 			}
-			fmt.Fprintf(stdout.Writer(), "[ocr] No valid tool results for %s, retrying...\n", taskKey)
+			progress.Noticef("No valid tool results for %s, retrying...\n", taskKey)
 		} else {
 			consecutiveEmptyRounds = 0
 		}
 
 		succeed := r.addNextMessage(ctx, content, calls, resp.Native(), thinking, results, &messages, taskKey, st)
 		if !succeed {
-			fmt.Fprintf(stdout.Writer(), "[ocr] Context compression exceeded threshold for %s, stopping.\n", taskKey)
+			progress.Noticef("Context compression exceeded threshold for %s, stopping.\n", taskKey)
 			stop = StopCompression
 			break
 		}
@@ -522,10 +587,10 @@ func (r *Runner) RunMainTask(ctx context.Context, messages []llm.Message, taskKe
 
 	switch stop {
 	case StopMaxRounds:
-		fmt.Fprintf(stdout.Writer(), "[ocr] Max tool requests reached for %s.\n", taskKey)
+		progress.Noticef("Max tool requests reached for %s.\n", taskKey)
 		r.runGraceRound(ctx, messages, taskKey, sessionID)
 	case StopTokenBudget:
-		fmt.Fprintf(stdout.Writer(), "[ocr] Token budget exceeded (used %d > budget %d) for %s.\n",
+		progress.Noticef("Token budget exceeded (used %d > budget %d) for %s.\n",
 			r.TotalTokensUsed(), r.deps.MaxTokensBudget, taskKey)
 		r.runGraceRound(ctx, messages, taskKey, sessionID)
 	}
@@ -555,7 +620,7 @@ func (r *Runner) runGraceRound(ctx context.Context, messages []llm.Message, task
 			"No other tools are available. Do not attempt further analysis."))
 
 	if ctx.Err() != nil {
-		fmt.Fprintf(stdout.Writer(), "[ocr] Grace round skipped for %s: context cancelled\n", taskKey)
+		progress.Noticef("Grace round skipped for %s: context cancelled\n", taskKey)
 		return
 	}
 
@@ -578,7 +643,7 @@ func (r *Runner) runGraceRound(ctx context.Context, messages []llm.Message, task
 		telemetry.RecordLLMResult(llmSpan, duration, 0, err)
 		llmSpan.End()
 		telemetry.RecordLLMRequest(ctx, r.deps.Model, duration, 0, "error")
-		fmt.Fprintf(stdout.Writer(), "[ocr] Grace round LLM error for %s: %v\n", taskKey, err)
+		progress.Noticef("Grace round LLM error for %s: %v\n", taskKey, err)
 		return
 	}
 
@@ -590,6 +655,7 @@ func (r *Runner) runGraceRound(ctx context.Context, messages []llm.Message, task
 		atomic.AddInt64(&r.totalOutputTokens, resp.Usage.CompletionTokens)
 		atomic.AddInt64(&r.totalCacheReadTokens, resp.Usage.CacheReadTokens)
 		atomic.AddInt64(&r.totalCacheWriteTokens, resp.Usage.CacheWriteTokens)
+		r.recordTaskUsage(taskKey, resp.Usage)
 	}
 	telemetry.RecordLLMResult(llmSpan, duration, totalTokens, nil)
 	llmSpan.End()
@@ -664,8 +730,8 @@ func (r *Runner) executeToolCall(ctx context.Context, taskKey string, call llm.T
 	args, err := parseToolArgs(call.Function.Arguments)
 	if err != nil {
 		errMsg := fmt.Sprintf("Error parsing tool arguments for %s: %v", toolName, err)
-		telemetry.PrintToolCallStarted(toolName, nil)
-		telemetry.PrintToolCallError(toolName, fmt.Errorf("%s", errMsg))
+		telemetry.PrintToolCallStarted(taskKey, toolName, nil)
+		telemetry.PrintToolCallError(taskKey, toolName, fmt.Errorf("%s", errMsg))
 		r.recordToolFailure(toolCallNumber, toolName, taskKey, errMsg,
 			rec, call.Function.Arguments, time.Since(callStarted))
 		return r.toolFailureResult(taskKey, toolName, errMsg)
@@ -674,7 +740,7 @@ func (r *Runner) executeToolCall(ctx context.Context, taskKey string, call llm.T
 	startTime := time.Now()
 
 	if t == tool.CodeComment {
-		telemetry.PrintToolCallStarted(t.Name(), args)
+		telemetry.PrintToolCallStarted(taskKey, t.Name(), args)
 		_, toolSpan := telemetry.StartToolSpan(ctx, t.Name())
 
 		comments, repair, errMsg := tool.ParseCommentsWithPath(args, taskKey)
@@ -692,7 +758,7 @@ func (r *Runner) executeToolCall(ctx context.Context, taskKey string, call llm.T
 			telemetry.RecordToolCall(ctx, t.Name(), dur, false)
 			r.recordToolFailure(toolCallNumber, toolName, taskKey, errMsg,
 				rec, call.Function.Arguments, dur)
-			telemetry.PrintToolCallError(t.Name(), toolErr)
+			telemetry.PrintToolCallError(taskKey, t.Name(), toolErr)
 			return r.toolFailureResult(taskKey, toolName, errMsg)
 		}
 
@@ -756,6 +822,7 @@ func (r *Runner) executeToolCall(ctx context.Context, taskKey string, call llm.T
 									atomic.AddInt64(&r.totalOutputTokens, resp.Usage.CompletionTokens)
 									atomic.AddInt64(&r.totalCacheReadTokens, resp.Usage.CacheReadTokens)
 									atomic.AddInt64(&r.totalCacheWriteTokens, resp.Usage.CacheWriteTokens)
+									r.recordTaskUsage(taskKey, resp.Usage)
 								}
 							} else {
 								rlRec.SetError(fmt.Errorf("re-location LLM call failed"), time.Since(rlStart))
@@ -779,7 +846,7 @@ func (r *Runner) executeToolCall(ctx context.Context, taskKey string, call llm.T
 					dur := time.Since(startTime)
 					telemetry.RecordToolResult(toolSpan, toolName, dur.Milliseconds(), nil)
 					toolSpan.End()
-					telemetry.PrintToolCallFinished(toolName, dur)
+					telemetry.PrintToolCallFinished(taskKey, toolName, dur)
 				}()
 				resolveAndCollect(asyncCtx)
 				return []model.LlmComment{}, nil
@@ -794,7 +861,7 @@ func (r *Runner) executeToolCall(ctx context.Context, taskKey string, call llm.T
 		telemetry.RecordToolResult(toolSpan, t.Name(), dur.Milliseconds(), nil)
 		toolSpan.End()
 		telemetry.RecordToolCall(ctx, t.Name(), dur, true)
-		telemetry.PrintToolCallFinished(t.Name(), dur)
+		telemetry.PrintToolCallFinished(taskKey, t.Name(), dur)
 		if rec != nil {
 			rec.AddToolResult(t.Name(), call.Function.Arguments, tool.CommentSucceed)
 		}
@@ -803,7 +870,7 @@ func (r *Runner) executeToolCall(ctx context.Context, taskKey string, call llm.T
 	}
 
 	// Synchronous path for all other tools
-	telemetry.PrintToolCallStarted(toolName, args)
+	telemetry.PrintToolCallStarted(taskKey, toolName, args)
 	_, toolSpan := telemetry.StartToolSpan(ctx, toolName)
 	result, err := p.Execute(ctx, args)
 	dur := time.Since(startTime)
@@ -815,10 +882,10 @@ func (r *Runner) executeToolCall(ctx context.Context, taskKey string, call llm.T
 	if err != nil {
 		r.recordToolFailure(toolCallNumber, toolName, taskKey, err.Error(),
 			rec, call.Function.Arguments, dur)
-		telemetry.PrintToolCallError(toolName, err)
+		telemetry.PrintToolCallError(taskKey, toolName, err)
 		return r.toolFailureResult(taskKey, toolName, fmt.Sprintf("Error executing tool %s: %v", toolName, err))
 	}
-	telemetry.PrintToolCallFinished(toolName, dur)
+	telemetry.PrintToolCallFinished(taskKey, toolName, dur)
 	if rec != nil {
 		rec.AddToolResult(toolName, call.Function.Arguments, result)
 	}
@@ -846,7 +913,7 @@ func (r *Runner) addNextMessage(ctx context.Context, assistantContent string, to
 		if *messages, err = r.runCompression(ctx, *messages, taskKey); err != nil {
 			// Compression failed; continue with over-limit messages — the
 			// post-append check below will retry.
-			fmt.Fprintf(stdout.Writer(), "[ocr] Memory compression failed: %v\n", err)
+			progress.Noticef("Memory compression failed: %v\n", err)
 		}
 	}
 
@@ -865,7 +932,7 @@ func (r *Runner) addNextMessage(ctx context.Context, assistantContent string, to
 		r.cancelPendingCompression(st)
 		var err error
 		if *messages, err = r.runCompression(ctx, *messages, taskKey); err != nil {
-			fmt.Fprintf(stdout.Writer(), "[ocr] Memory compression failed: %v\n", err)
+			progress.Noticef("Memory compression failed: %v\n", err)
 		}
 		finalCount = CountMessagesTokens(*messages)
 	}

@@ -211,20 +211,20 @@ func TestPrintTraceSummary_WithoutSessionID(t *testing.T) {
 }
 
 func TestPrintToolCallStarted_WithArgs(t *testing.T) {
-	PrintToolCallStarted("file_read", map[string]any{"path": "main.go"})
+	PrintToolCallStarted("g1", "file_read", map[string]any{"path": "main.go"})
 }
 
 func TestPrintToolCallStarted_NoArgs(t *testing.T) {
-	PrintToolCallStarted("list_files", nil)
+	PrintToolCallStarted("g1", "list_files", nil)
 }
 
 func TestPrintToolCallFinished(t *testing.T) {
-	PrintToolCallFinished("file_read", 123*time.Millisecond)
+	PrintToolCallFinished("g1", "file_read", 123*time.Millisecond)
 }
 
 func TestPrintToolCallError(t *testing.T) {
 	out := captureStderr(t, func() {
-		PrintToolCallError("file_read", fmt.Errorf("permission denied"))
+		PrintToolCallError("g1", "file_read", fmt.Errorf("permission denied"))
 	})
 	if !strings.Contains(out, "✘ file_read") {
 		t.Errorf("expected tool name with X mark, got %q", out)

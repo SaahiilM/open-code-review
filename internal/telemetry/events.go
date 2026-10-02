@@ -6,7 +6,6 @@ package telemetry
 import (
 	"context"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -16,7 +15,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/alibaba/open-code-review/internal/stdout"
+	"github.com/alibaba/open-code-review/internal/progress"
 )
 
 // Event emits a structured event as a span with immediate end.
@@ -86,43 +85,73 @@ type TraceSummary struct {
 func PrintTraceSummary(s TraceSummary) {
 	elapsed := s.Duration.Round(time.Second).String()
 	if s.InputTokens > 0 || s.OutputTokens > 0 {
-		base := fmt.Sprintf("[ocr] Summary: %d file(s) reviewed, %d comment(s), ~%d token(s) used (input: ~%d, output: ~%d)",
+		base := fmt.Sprintf("Summary: %d file(s) reviewed, %d comment(s), ~%d token(s) used (input: ~%d, output: ~%d)",
 			s.FilesReviewed, s.CommentsGenerated, s.TotalTokens, s.InputTokens, s.OutputTokens)
 		if s.CacheReadTokens > 0 || s.CacheWriteTokens > 0 {
 			base += fmt.Sprintf(", cache(read: ~%d, write: ~%d)", s.CacheReadTokens, s.CacheWriteTokens)
 		}
-		fmt.Fprintf(stdout.Writer(), "%s, %s elapsed\n", base, elapsed)
+		progress.Noticef("%s, %s elapsed\n", base, elapsed)
 	} else {
-		fmt.Fprintf(stdout.Writer(), "[ocr] Summary: %d file(s) reviewed, %d comment(s), ~%d token(s) used, %s elapsed\n",
+		progress.Noticef("Summary: %d file(s) reviewed, %d comment(s), ~%d token(s) used, %s elapsed\n",
 			s.FilesReviewed, s.CommentsGenerated, s.TotalTokens, elapsed)
 	}
 	if s.SessionID != "" {
-		fmt.Fprintf(stdout.Writer(), "[ocr] Session: %s\n", s.SessionID)
+		progress.Noticef("Session: %s\n", s.SessionID)
 	}
 }
 
-// PrintToolCallStarted prints a line when a tool begins execution.
-// Args are summarized as key-value pairs (path, search terms, etc.).
+// PrintToolCallStarted reports that a tool has begun executing. Args are
+// summarized as key-value pairs (path, search terms, etc.). taskKey identifies
+// the concurrent unit of work the call belongs to, so a live dashboard can
+// attribute the call to the file that made it.
 // Example: [ocr]   ▶ file_read "internal/config/rules/loader.go"
-func PrintToolCallStarted(toolName string, args map[string]any) {
+func PrintToolCallStarted(taskKey, toolName string, args map[string]any) {
 	summary := summarizeArgs(args)
+	text := "  ▶ " + toolName
 	if summary != "" {
-		fmt.Fprintf(stdout.Writer(), "[ocr]   ▶ %s %s\n", toolName, summary)
-	} else {
-		fmt.Fprintf(stdout.Writer(), "[ocr]   ▶ %s\n", toolName)
+		text += " " + summary
 	}
+	progress.Publish(progress.Event{
+		Kind:   progress.KindToolStart,
+		Text:   text + "\n",
+		Detail: toolLine(toolName, summary),
+		Group:  taskKey,
+	})
 }
 
-// PrintToolCallFinished prints a line when a tool finishes successfully.
+// PrintToolCallFinished reports that a tool finished successfully.
 // Example: [ocr]   ✔ file_read "internal/config/rules/loader.go" (12ms)
-func PrintToolCallFinished(toolName string, dur time.Duration) {
-	fmt.Fprintf(stdout.Writer(), "[ocr]   ✔ %s (%s)\n", toolName, FormatDuration(dur))
+func PrintToolCallFinished(taskKey, toolName string, dur time.Duration) {
+	progress.Publish(progress.Event{
+		Kind:   progress.KindToolDone,
+		Text:   fmt.Sprintf("  ✔ %s (%s)\n", toolName, FormatDuration(dur)),
+		Detail: toolLine(toolName, FormatDuration(dur)),
+		Group:  taskKey,
+	})
 }
 
-// PrintToolCallError prints a line when a tool fails.
+// PrintToolCallError reports that a tool failed. It keeps the stderr routing
+// it has always had, which is what makes it visible alongside a json document
+// on stdout.
 // Example: [ocr]   ✘ file_read "internal/config/rules/loader.go" failed: permission denied
-func PrintToolCallError(toolName string, err error) {
-	fmt.Fprintf(os.Stderr, "[ocr]   ✘ %s failed: %v\n", toolName, err)
+func PrintToolCallError(taskKey, toolName string, err error) {
+	progress.Publish(progress.Event{
+		Kind:   progress.KindToolError,
+		Text:   fmt.Sprintf("  ✘ %s failed: %v\n", toolName, err),
+		Detail: toolLine(toolName, "failed"),
+		Err:    err.Error(),
+		Group:  taskKey,
+		Stderr: true,
+	})
+}
+
+// toolLine is the compact form the work list shows beside a running row: the
+// tool and its target, with neither the timestamp nor the marker glyph.
+func toolLine(toolName, detail string) string {
+	if detail == "" {
+		return toolName
+	}
+	return toolName + " " + detail
 }
 
 // summarizeArgs extracts a concise key=value summary from tool arguments for console display.

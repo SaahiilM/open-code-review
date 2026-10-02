@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/alibaba/open-code-review/internal/llm"
+	"github.com/alibaba/open-code-review/internal/progress"
 	"github.com/alibaba/open-code-review/internal/session"
-	"github.com/alibaba/open-code-review/internal/stdout"
 )
 
 // Compression thresholds, as fractions of MaxTokens.
@@ -272,6 +272,9 @@ func (r *Runner) runCompression(ctx context.Context, msgs []llm.Message, taskKey
 		atomic.AddInt64(&r.totalOutputTokens, resp.Usage.CompletionTokens)
 		atomic.AddInt64(&r.totalCacheReadTokens, resp.Usage.CacheReadTokens)
 		atomic.AddInt64(&r.totalCacheWriteTokens, resp.Usage.CacheWriteTokens)
+		// Compression is billed to the same task as the conversation it was
+		// compressing, so its tokens belong in that task's total too.
+		r.recordTaskUsage(taskKey, resp.Usage)
 	}
 
 	rawSummary := stripMarkdownFences(resp.Content())
@@ -331,7 +334,7 @@ func (r *Runner) triggerAsyncCompression(ctx context.Context, st *compressionSta
 			// pendingJob under the lock, so cancelled jobs fail the ownership
 			// check above and die silently). Abandon the job rather than
 			// applying a truncated/unmodified snapshot over live messages.
-			fmt.Fprintf(stdout.Writer(), "[ocr] Memory compression failed: %v\n", err)
+			progress.Noticef("Memory compression failed: %v\n", err)
 			st.pendingJob = nil
 			close(job.done)
 			return
