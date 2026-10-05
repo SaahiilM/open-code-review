@@ -21,8 +21,8 @@ import (
 	"github.com/alibaba/open-code-review/internal/llm"
 	"github.com/alibaba/open-code-review/internal/llmloop"
 	"github.com/alibaba/open-code-review/internal/model"
+	"github.com/alibaba/open-code-review/internal/progress"
 	"github.com/alibaba/open-code-review/internal/session"
-	"github.com/alibaba/open-code-review/internal/stdout"
 	"github.com/alibaba/open-code-review/internal/telemetry"
 	"github.com/alibaba/open-code-review/internal/tool"
 )
@@ -281,7 +281,7 @@ func (a *Agent) initResumeInfo(items []model.ScanItem) {
 		PreviousModel: resume.Model,
 		CurrentModel:  a.args.Model,
 	}
-	fmt.Fprintf(stdout.Writer(), "[ocr] Resume %s: reusing %d file(s), reviewing %d file(s)\n", resume.SessionID, reused, rerun)
+	progress.Noticef("Resume %s: reusing %d file(s), reviewing %d file(s)\n", resume.SessionID, reused, rerun)
 }
 
 func (a *Agent) resumeItem(fingerprint string) (session.ResumeItem, bool) {
@@ -337,11 +337,12 @@ func (a *Agent) Run(ctx context.Context) ([]model.LlmComment, error) {
 	a.items = selectedScanItems(decisions)
 
 	reviewable := len(a.items)
-	fmt.Fprintf(stdout.Writer(), "[ocr] full-scan: %d file(s) discovered, reviewing %d in %s\n",
+	progress.Noticef("full-scan: %d file(s) discovered, reviewing %d in %s\n",
 		totalDiscovered, reviewable, a.args.RepoDir)
+	publishPlanned(reviewable)
 
 	if reviewable == 0 {
-		fmt.Fprintln(stdout.Writer(), "[ocr] No reviewable files. Skipping scan.")
+		progress.Notice("No reviewable files. Skipping scan.\n")
 		telemetry.Event(ctx, "scan.no.files")
 		// A clean skip still has to reach disk: if session_end never persisted,
 		// the skip cannot be claimed. Scan has no manifest builder, but the
@@ -354,11 +355,11 @@ func (a *Agent) Run(ctx context.Context) ([]model.LlmComment, error) {
 
 	// Pre-run cost projection so users aren't surprised by a large scan.
 	est := estimateCost(a.items, a.planEnabled(), a.dedupEnabled(), a.summaryEnabled())
-	fmt.Fprintf(stdout.Writer(), "[ocr] estimated cost: %s\n", est)
+	progress.Noticef("estimated cost: %s\n", est)
 	if a.args.MaxTokensBudget > 0 {
-		fmt.Fprintf(stdout.Writer(), "[ocr] token budget: %s (dispatch stops once exceeded)\n", humanTokens(a.args.MaxTokensBudget))
+		progress.Noticef("token budget: %s (dispatch stops once exceeded)\n", humanTokens(a.args.MaxTokensBudget))
 		if est.TotalTokens > a.args.MaxTokensBudget {
-			fmt.Fprintf(stdout.Writer(), "[ocr] WARNING: estimate (%s) exceeds budget (%s); scan will stop partway\n",
+			progress.Warningf("estimate (%s) exceeds budget (%s); scan will stop partway\n",
 				humanTokens(est.TotalTokens), humanTokens(a.args.MaxTokensBudget))
 		}
 	}
@@ -474,16 +475,19 @@ func (a *Agent) logSelection(decisions []scanSelection) {
 			continue
 		}
 		if decision.item.IsBinary {
-			fmt.Fprintf(stdout.Writer(), "[ocr] Skipping %s — binary file\n", decision.item.Path)
+			progress.Skipped(decision.item.Path, "binary file",
+				fmt.Sprintf("Skipping %s — binary file\n", decision.item.Path))
 		} else if decision.reason == model.ExcludeSecret {
-			fmt.Fprintf(stdout.Writer(), "[ocr] Skipping %s — matches a built-in secret path\n", decision.item.Path)
+			progress.Skipped(decision.item.Path, "matches a built-in secret path",
+				fmt.Sprintf("Skipping %s — matches a built-in secret path\n", decision.item.Path))
 		} else {
-			fmt.Fprintf(stdout.Writer(), "[ocr] Skipping %s — filtered by path/extension rules\n", decision.item.Path)
+			progress.Skipped(decision.item.Path, "filtered by path/extension rules",
+				fmt.Sprintf("Skipping %s — filtered by path/extension rules\n", decision.item.Path))
 		}
 		staticSkipped++
 	}
 	if staticSkipped > 0 {
-		fmt.Fprintf(stdout.Writer(), "[ocr] Filtered %d file(s) by include/exclude rules\n", staticSkipped)
+		progress.Noticef("Filtered %d file(s) by include/exclude rules\n", staticSkipped)
 	}
 
 	largeSkipped := 0
@@ -491,12 +495,13 @@ func (a *Agent) logSelection(decisions []scanSelection) {
 		if decision.reason != model.ExcludeTooLarge {
 			continue
 		}
-		fmt.Fprintf(stdout.Writer(), "[ocr] Skipping %s (~%d tokens exceeds 80%% of max_tokens(%d))\n",
-			decision.item.Path, decision.tokens, a.args.Template.MaxTokens)
+		progress.Skipped(decision.item.Path, "exceeds 80% of max_tokens",
+			fmt.Sprintf("Skipping %s (~%d tokens exceeds 80%% of max_tokens(%d))\n",
+				decision.item.Path, decision.tokens, a.args.Template.MaxTokens))
 		largeSkipped++
 	}
 	if largeSkipped > 0 {
-		fmt.Fprintf(stdout.Writer(), "[ocr] Pre-filtered %d file(s) exceeding 80%% of max_tokens\n", largeSkipped)
+		progress.Noticef("Pre-filtered %d file(s) exceeding 80%% of max_tokens\n", largeSkipped)
 	}
 }
 
@@ -561,9 +566,11 @@ func (a *Agent) dispatchSubtasks(ctx context.Context) ([]model.LlmComment, error
 	a.initScanFingerprints(a.items)
 	a.initResumeInfo(a.items)
 
+	a.publishReusedUpfront()
+
 	strategy := a.resolveBatchStrategy()
 	batches := groupBatches(a.items, strategy, a.args.Template.BatchSize)
-	fmt.Fprintf(stdout.Writer(), "[ocr] scan dispatch: %d batch(es) by %s strategy\n", len(batches), strategy)
+	progress.Noticef("scan dispatch: %d batch(es) by %s strategy\n", len(batches), strategy)
 
 	var dispatched int64
 	for bi, batch := range batches {
@@ -708,6 +715,8 @@ func (a *Agent) dispatchBatch(ctx context.Context, batchIdx int, batch []model.S
 				originalComments: item.Comments,
 			})
 			checkpointsMu.Unlock()
+			// Already counted by publishReusedUpfront; a per-file publish
+			// here would double it.
 			continue
 		}
 
@@ -717,7 +726,7 @@ func (a *Agent) dispatchBatch(ctx context.Context, batchIdx int, batch []model.S
 			used := a.runner.TotalTokensUsed()
 			projected := used + estimateFileTokens(it, a.planEnabled())
 			if projected > a.args.MaxTokensBudget {
-				fmt.Fprintf(stdout.Writer(), "[ocr] token budget reached (used %s + next-file est ≈ %s > budget %s) — skipping %s and remaining files\n",
+				progress.Noticef("token budget reached (used %s + next-file est ≈ %s > budget %s) — skipping %s and remaining files\n",
 					humanTokens(used), humanTokens(projected), humanTokens(a.args.MaxTokensBudget), it.Path)
 				a.recordWarning("token_budget_reached", it.Path,
 					fmt.Sprintf("stopped in batch #%d: used %d tokens + next-file estimate exceeds budget %d", batchIdx, used, a.args.MaxTokensBudget))
@@ -725,6 +734,7 @@ func (a *Agent) dispatchBatch(ctx context.Context, batchIdx int, batch []model.S
 				// budgetHit is per-batch and dies with this call; the field is
 				// the run-level signal emitRunResult reads after Run returns.
 				a.budgetExceeded = true
+				publishBudgetReached()
 				break
 			}
 		}
@@ -738,6 +748,7 @@ func (a *Agent) dispatchBatch(ctx context.Context, batchIdx int, batch []model.S
 
 		dispatched++
 		wg.Add(1)
+		publishItemStart(it)
 		go func(it model.ScanItem, fingerprint string) {
 			defer wg.Done()
 			defer func() { <-sem }()
@@ -755,7 +766,8 @@ func (a *Agent) dispatchBatch(ctx context.Context, batchIdx int, batch []model.S
 			if err != nil {
 				atomic.AddInt64(&a.subtaskFailed, 1)
 				a.session.RecordReviewItemFailed(it.Path, it.Path, it.Path, fingerprint, err.Error())
-				fmt.Fprintf(stdout.Writer(), "[ocr] Scan subtask error for %s (batch #%d): %v\n", it.Path, batchIdx, err)
+				progress.Noticef("Scan subtask error for %s (batch #%d): %v\n", it.Path, batchIdx, err)
+				publishItemFailed(it, err.Error())
 				telemetry.ErrorEvent(fileCtx, "scan.subtask.error", err,
 					telemetry.AnyToAttr("file.path", it.Path),
 					telemetry.AnyToAttr("batch.index", batchIdx))
@@ -767,9 +779,11 @@ func (a *Agent) dispatchBatch(ctx context.Context, batchIdx int, batch []model.S
 					atomic.AddInt64(&a.subtaskFailed, 1)
 					a.session.RecordReviewItemFailed(it.Path, it.Path, it.Path, fingerprint, skipReason)
 					a.recordWarning("scan_subtask_error", it.Path, skipReason)
+					publishItemFailed(it, skipReason)
 				}
 				return
 			}
+			publishItemDone(it, len(a.args.CommentCollector.CommentsForPath(it.Path)))
 			checkpointsMu.Lock()
 			checkpoints = append(checkpoints, batchCheckpoint{item: it})
 			checkpointsMu.Unlock()
@@ -813,7 +827,7 @@ func (a *Agent) executeSubtask(ctx context.Context, it model.ScanItem) (bool, st
 	tokenLimit := llmloop.PromptTokenLimit(maxAllowed)
 	if tokenCount > tokenLimit {
 		msg := fmt.Sprintf("prompt tokens (%d) exceed %d%% of max_tokens(%d)", tokenCount, 80, maxAllowed)
-		fmt.Fprintf(stdout.Writer(), "[ocr] WARNING: %s for %s\n", msg, it.Path)
+		progress.Warningf("%s for %s\n", msg, it.Path)
 		a.recordWarning("token_threshold_exceeded", it.Path, msg)
 		telemetry.Event(ctx, "token.threshold.exceeded",
 			telemetry.AnyToAttr("file.path", it.Path),
@@ -877,7 +891,7 @@ func (a *Agent) maybeRunPlan(ctx context.Context, it model.ScanItem, rule string
 	})
 	if err != nil {
 		rec.SetError(err, time.Since(startTime))
-		fmt.Fprintf(stdout.Writer(), "[ocr] scan plan failed for %s: %v (falling back to plan-less)\n", it.Path, err)
+		progress.Noticef("scan plan failed for %s: %v (falling back to plan-less)\n", it.Path, err)
 		return noPlan
 	}
 	rec.SetResponse(resp, time.Since(startTime))
@@ -932,7 +946,7 @@ func (a *Agent) maybeRunProjectSummary(ctx context.Context, comments []model.Llm
 	})
 	if err != nil {
 		rec.SetError(err, time.Since(startTime))
-		fmt.Fprintf(stdout.Writer(), "[ocr] scan project summary failed: %v\n", err)
+		progress.Noticef("scan project summary failed: %v\n", err)
 		return
 	}
 	rec.SetResponse(resp, time.Since(startTime))
@@ -1011,7 +1025,7 @@ func (a *Agent) maybeRunDedup(ctx context.Context, batchIdx, batchStart int) map
 	})
 	if err != nil {
 		rec.SetError(err, time.Since(startTime))
-		fmt.Fprintf(stdout.Writer(), "[ocr] scan dedup failed for batch #%d: %v (keeping originals)\n", batchIdx, err)
+		progress.Noticef("scan dedup failed for batch #%d: %v (keeping originals)\n", batchIdx, err)
 		return nil
 	}
 	rec.SetResponse(resp, time.Since(startTime))
@@ -1019,7 +1033,7 @@ func (a *Agent) maybeRunDedup(ctx context.Context, batchIdx, batchStart int) map
 
 	deduped, dedupCheckpoints, ok := applyDedupGroupsWithCheckpoints(resp.Content(), batchComments)
 	if !ok {
-		fmt.Fprintf(stdout.Writer(), "[ocr] scan dedup batch #%d: malformed groups, keeping originals\n", batchIdx)
+		progress.Noticef("scan dedup batch #%d: malformed groups, keeping originals\n", batchIdx)
 		return nil
 	}
 	if len(deduped) == len(batchComments) {
@@ -1027,7 +1041,7 @@ func (a *Agent) maybeRunDedup(ctx context.Context, batchIdx, batchStart int) map
 		return nil
 	}
 	a.args.CommentCollector.ReplaceSince(batchStart, deduped)
-	fmt.Fprintf(stdout.Writer(), "[ocr] scan dedup batch #%d: %d → %d comments\n", batchIdx, len(batchComments), len(deduped))
+	progress.Noticef("scan dedup batch #%d: %d → %d comments\n", batchIdx, len(batchComments), len(deduped))
 	return dedupCheckpoints
 }
 
