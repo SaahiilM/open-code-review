@@ -263,7 +263,7 @@ func TestRenderTemplate_SessionsTableMockup(t *testing.T) {
 		`<td class="col-mode">range</td>`,
 		`<td class="col-model">claude-opus-5</td>`,
 		`<td class="col-files">8</td>`,
-		`<td>complete</td>`,
+		`<td><span class="session-status status-complete">complete</span></td>`,
 		`<td class="col-comments">5</td>`,
 		`<td class="col-duration">4m50s</td>`,
 		`<a href="/r/my-repo/compare?before=older-session&amp;after=` + fullID + `">Compare</a>`,
@@ -1037,8 +1037,10 @@ func TestSessionTemplateLoadsPagerScript(t *testing.T) {
 		Comments: []*ReviewComment{{FilePath: "a.go", Content: "c1", Category: "bug", Severity: "high"}},
 	}
 	renderTemplate(rr, "session.html", sessionPageData{EncodedRepo: "r", RepoName: "R", Session: vs})
-	if !strings.Contains(rr.Body.String(), `<script src="/static/a11y.js"></script><script src="/static/pager.js"></script><script src="/static/session.js"></script>`) {
-		t.Error("session page should load a11y.js, pager.js, and session.js in dependency order")
+	// agent.js binds per-finding menus and live.js starts the duration ticker;
+	// both are independent of session.js, but all four must load on this page.
+	if !strings.Contains(rr.Body.String(), `<script src="/static/a11y.js"></script><script src="/static/pager.js"></script><script src="/static/agent.js"></script><script src="/static/session.js"></script><script src="/static/live.js"></script>`) {
+		t.Error("session page should load a11y.js, pager.js, agent.js, session.js and live.js in dependency order")
 	}
 }
 
