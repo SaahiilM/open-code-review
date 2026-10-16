@@ -16,8 +16,8 @@ import (
 	"github.com/alibaba/open-code-review/internal/diff"
 	"github.com/alibaba/open-code-review/internal/llm"
 	"github.com/alibaba/open-code-review/internal/model"
-	"github.com/alibaba/open-code-review/internal/progress"
 	"github.com/alibaba/open-code-review/internal/session"
+	"github.com/alibaba/open-code-review/internal/stdout"
 	"github.com/alibaba/open-code-review/internal/telemetry"
 	"github.com/alibaba/open-code-review/internal/tool"
 	"github.com/google/uuid"
@@ -105,19 +105,12 @@ type Runner struct {
 	totalOutputTokens     int64
 	totalCacheReadTokens  int64
 	totalCacheWriteTokens int64
-	// byTask breaks the same usage down per taskKey, so a caller running
-	// several units of work concurrently can attribute tokens to the one that
-	// spent them. The process-wide counters above cannot answer that: with N
-	// groups in flight, a snapshot delta around one group would also capture
-	// every other group's calls.
-	byTaskMu         sync.Mutex
-	byTask           map[string]*TaskUsage
-	warningsMu       sync.Mutex
-	warnings         []AgentWarning
-	toolCallsMu      sync.Mutex
-	toolCalls        map[string]int64
-	toolCallSequence int64
-	toolFailures     []ToolFailureDetail
+	warningsMu            sync.Mutex
+	warnings              []AgentWarning
+	toolCallsMu           sync.Mutex
+	toolCalls             map[string]int64
+	toolCallSequence      int64
+	toolFailures          []ToolFailureDetail
 	// toolFailureStreak counts each (taskKey, toolName) pair's consecutive
 	// failures; see tool_failure_streak.go.
 	toolFailureStreak toolFailureStreakState
@@ -258,56 +251,6 @@ func (r *Runner) recordToolFailure(number int64, name, taskKey, errMsg string,
 	}
 }
 
-// TaskUsage is the token usage attributed to one unit of work.
-type TaskUsage struct {
-	InputTokens  int64
-	OutputTokens int64
-}
-
-// recordTaskUsage attributes a response's usage to one taskKey. It is called
-// at every point where the process-wide counters are updated, so the two
-// breakdowns can never disagree about the total.
-func (r *Runner) recordTaskUsage(taskKey string, u *llm.UsageInfo) {
-	if u == nil || taskKey == "" {
-		return
-	}
-	r.byTaskMu.Lock()
-	defer r.byTaskMu.Unlock()
-	if r.byTask == nil {
-		r.byTask = make(map[string]*TaskUsage)
-	}
-	t := r.byTask[taskKey]
-	if t == nil {
-		t = &TaskUsage{}
-		r.byTask[taskKey] = t
-	}
-	t.InputTokens += u.PromptTokens
-	t.OutputTokens += u.CompletionTokens
-
-	// Publish after releasing the map lock, carrying the cumulative totals for
-	// this task rather than the delta: the dashboard updates a row's running
-	// total, and a delta would need it to sum deltas itself.
-	progress.Publish(progress.Event{
-		Kind:         progress.KindUsage,
-		Group:        taskKey,
-		InputTokens:  t.InputTokens,
-		OutputTokens: t.OutputTokens,
-	})
-}
-
-// UsageForTask returns the tokens one taskKey has spent, and whether it has
-// spent any. A task that has not been seen reports false rather than a zero
-// total, so a caller can tell "no usage recorded" from "genuinely zero".
-func (r *Runner) UsageForTask(taskKey string) (TaskUsage, bool) {
-	r.byTaskMu.Lock()
-	defer r.byTaskMu.Unlock()
-	t, ok := r.byTask[taskKey]
-	if !ok {
-		return TaskUsage{}, false
-	}
-	return *t, true
-}
-
 // RecordUsage adds the prompt/completion/cache tokens reported by an LLM
 // response to the runner's aggregate counters. Used by callers (plan phase
 // in agent / future scan phases) that perform their own LLM calls outside
@@ -320,13 +263,6 @@ func (r *Runner) RecordUsage(u *llm.UsageInfo) {
 	atomic.AddInt64(&r.totalOutputTokens, u.CompletionTokens)
 	atomic.AddInt64(&r.totalCacheReadTokens, u.CacheReadTokens)
 	atomic.AddInt64(&r.totalCacheWriteTokens, u.CacheWriteTokens)
-}
-
-// RecordUsageFor is RecordUsage with the task attribution the live dashboard
-// needs. Callers that already know their taskKey should prefer it.
-func (r *Runner) RecordUsageFor(taskKey string, u *llm.UsageInfo) {
-	r.RecordUsage(u)
-	r.recordTaskUsage(taskKey, u)
 }
 
 // CollectPendingComments awaits any async comment-processing workers and
@@ -344,12 +280,15 @@ func (r *Runner) CollectPendingComments() []model.LlmComment {
 // classification instead of guessing from free text: only a configured limit
 // (max tool-request rounds) is a budget stop; the empty-round and compression
 // exits are genuine but unclassifiable, so they map to the unknown catch-all.
-// StopNone means the loop returned via task_done (completed) or via an error.
+// StopNone means the loop returned via task_done in a normal round or via an
+// error. A task_done carried by the grace round is the exception: it completes
+// the run while the stop keeps naming the budget exit that reached that round,
+// so the completed flag, not the stop, is what separates success from failure.
 type MainLoopStop int
 
 const (
-	// StopNone — RunMainTask completed via task_done or returned an error; the
-	// stop cause carries no additional meaning.
+	// StopNone — RunMainTask completed via a task_done in a normal round, or
+	// returned an error; the stop cause carries no additional meaning.
 	StopNone MainLoopStop = iota
 	// StopMaxRounds — the configured MaxToolRequestTimes round budget was
 	// exhausted before task_done. This is a declared budget limit.
@@ -422,9 +361,12 @@ func (s MainLoopStop) Reason() string {
 // returned by the model, and collects review comments until task_done is
 // called or limits are reached. Token usage and warnings are aggregated on the
 // Runner across every call. The returned bool is true only when the model
-// explicitly calls task_done with a successful state. The MainLoopStop return
-// classifies a non-completed, non-error stop at its trigger point so the caller
-// never has to infer the cause from text or context state.
+// explicitly calls task_done with a successful state, including one issued in
+// the grace round that follows an exhausted budget. That grace round also
+// records a WarningReviewLimitReached warning, so a spent limit stays visible
+// even when the completion it produced is the only other trace of it. The
+// MainLoopStop return classifies a non-completed, non-error stop at its trigger
+// point so the caller never has to infer the cause from text or context state.
 //
 // taskKey identifies the subtask this conversation belongs to, and is not
 // necessarily a file path: scan passes one file's path, while review passes the
@@ -507,7 +449,6 @@ func (r *Runner) RunMainTask(ctx context.Context, messages []llm.Message, taskKe
 			atomic.AddInt64(&r.totalOutputTokens, resp.Usage.CompletionTokens)
 			atomic.AddInt64(&r.totalCacheReadTokens, resp.Usage.CacheReadTokens)
 			atomic.AddInt64(&r.totalCacheWriteTokens, resp.Usage.CacheWriteTokens)
-			r.recordTaskUsage(taskKey, resp.Usage)
 		}
 		telemetry.RecordLLMResult(llmSpan, duration, totalTokens, nil)
 		llmSpan.End()
@@ -517,7 +458,7 @@ func (r *Runner) RunMainTask(ctx context.Context, messages []llm.Message, taskKe
 		calls := resp.ToolCalls()
 
 		if len(calls) == 0 {
-			progress.Noticef("No tool calls parsed for %s, retrying...\n", taskKey)
+			fmt.Fprintf(stdout.Writer(), "[ocr] No tool calls parsed for %s, retrying...\n", taskKey)
 			messages = append(messages, llm.NewTextMessage("user", "You did not successfully call any tools. Please try again or use task_done if finished."))
 			native := resp.Native()
 			reasoning := resp.ReasoningContent()
@@ -568,33 +509,44 @@ func (r *Runner) RunMainTask(ctx context.Context, messages []llm.Message, taskKe
 		if !hasValidResult {
 			consecutiveEmptyRounds++
 			if consecutiveEmptyRounds >= maxConsecutiveEmptyRounds {
-				progress.Noticef("Too many empty retries for %s, stopping.\n", taskKey)
+				fmt.Fprintf(stdout.Writer(), "[ocr] Too many empty retries for %s, stopping.\n", taskKey)
 				stop = StopEmptyRounds
 				break
 			}
-			progress.Noticef("No valid tool results for %s, retrying...\n", taskKey)
+			fmt.Fprintf(stdout.Writer(), "[ocr] No valid tool results for %s, retrying...\n", taskKey)
 		} else {
 			consecutiveEmptyRounds = 0
 		}
 
 		succeed := r.addNextMessage(ctx, content, calls, resp.Native(), thinking, results, &messages, taskKey, st)
 		if !succeed {
-			progress.Noticef("Context compression exceeded threshold for %s, stopping.\n", taskKey)
+			fmt.Fprintf(stdout.Writer(), "[ocr] Context compression exceeded threshold for %s, stopping.\n", taskKey)
 			stop = StopCompression
 			break
 		}
 	}
 
+	// The grace round after a spent budget is the last chance to finish the
+	// task, so a task_done it carries counts as completion. The caller records
+	// the subtask as incomplete otherwise, and a resume re-runs a file the
+	// model already declared done.
+	completed := false
 	switch stop {
 	case StopMaxRounds:
-		progress.Noticef("Max tool requests reached for %s.\n", taskKey)
-		r.runGraceRound(ctx, messages, taskKey, sessionID)
+		fmt.Fprintf(stdout.Writer(), "[ocr] Max tool requests reached for %s.\n", taskKey)
+		completed = r.runGraceRound(ctx, messages, taskKey, sessionID)
 	case StopTokenBudget:
-		progress.Noticef("Token budget exceeded (used %d > budget %d) for %s.\n",
+		fmt.Fprintf(stdout.Writer(), "[ocr] Token budget exceeded (used %d > budget %d) for %s.\n",
 			r.TotalTokensUsed(), r.deps.MaxTokensBudget, taskKey)
-		r.runGraceRound(ctx, messages, taskKey, sessionID)
+		completed = r.runGraceRound(ctx, messages, taskKey, sessionID)
 	}
-	return false, stop, nil
+	// Both budget stops above ran the grace round, and completion is the only
+	// other trace it leaves: without this warning a caller would see a
+	// completed task and never learn that its budget ran out mid-review.
+	if stop == StopMaxRounds || stop == StopTokenBudget {
+		r.recordGraceRoundLimit(taskKey, stop, completed)
+	}
+	return completed, stop, nil
 }
 
 // tokenBudgetExceeded reports whether the run's aggregate token usage is past
@@ -606,11 +558,13 @@ func (r *Runner) tokenBudgetExceeded() bool {
 
 // runGraceRound performs one final LLM call after the tool-request budget is
 // exhausted, giving the model a chance to submit any findings it identified
-// but did not yet report via code_comment.
-func (r *Runner) runGraceRound(ctx context.Context, messages []llm.Message, taskKey string, sessionID string) {
+// but did not yet report via code_comment. It reports whether the model called
+// task_done with a successful state in that round: the grace round is a regular
+// main-task round, so its verdict on the subtask has to count.
+func (r *Runner) runGraceRound(ctx context.Context, messages []llm.Message, taskKey string, sessionID string) bool {
 	graceDefs := graceRoundToolDefs(r.deps.MainToolDefs)
 	if len(graceDefs) == 0 {
-		return
+		return false
 	}
 
 	messages = append(messages, llm.NewTextMessage("user",
@@ -620,8 +574,8 @@ func (r *Runner) runGraceRound(ctx context.Context, messages []llm.Message, task
 			"No other tools are available. Do not attempt further analysis."))
 
 	if ctx.Err() != nil {
-		progress.Noticef("Grace round skipped for %s: context cancelled\n", taskKey)
-		return
+		fmt.Fprintf(stdout.Writer(), "[ocr] Grace round skipped for %s: context cancelled\n", taskKey)
+		return false
 	}
 
 	fs := r.deps.Session.GetOrCreateFileSession(taskKey)
@@ -643,8 +597,8 @@ func (r *Runner) runGraceRound(ctx context.Context, messages []llm.Message, task
 		telemetry.RecordLLMResult(llmSpan, duration, 0, err)
 		llmSpan.End()
 		telemetry.RecordLLMRequest(ctx, r.deps.Model, duration, 0, "error")
-		progress.Noticef("Grace round LLM error for %s: %v\n", taskKey, err)
-		return
+		fmt.Fprintf(stdout.Writer(), "[ocr] Grace round LLM error for %s: %v\n", taskKey, err)
+		return false
 	}
 
 	rec.SetResponse(resp, duration)
@@ -655,7 +609,6 @@ func (r *Runner) runGraceRound(ctx context.Context, messages []llm.Message, task
 		atomic.AddInt64(&r.totalOutputTokens, resp.Usage.CompletionTokens)
 		atomic.AddInt64(&r.totalCacheReadTokens, resp.Usage.CacheReadTokens)
 		atomic.AddInt64(&r.totalCacheWriteTokens, resp.Usage.CacheWriteTokens)
-		r.recordTaskUsage(taskKey, resp.Usage)
 	}
 	telemetry.RecordLLMResult(llmSpan, duration, totalTokens, nil)
 	llmSpan.End()
@@ -663,13 +616,41 @@ func (r *Runner) runGraceRound(ctx context.Context, messages []llm.Message, task
 
 	calls := resp.ToolCalls()
 	if len(calls) == 0 {
-		return
+		return false
 	}
 
+	// Only task_done reports completion; code_comment records findings. A FAILED
+	// task_done is neither, so the round stays incomplete.
+	completed := false
+	failed := false
 	thinking := resp.ReasoningContent()
 	for _, call := range calls {
-		r.executeToolCall(ctx, taskKey, call, rec, thinking)
+		checkpoint := r.executeToolCall(ctx, taskKey, call, rec, thinking)
+		completed = completed || checkpoint.Completed
+		failed = failed || checkpoint.Failed
 	}
+	return completed && !failed
+}
+
+// WarningReviewLimitReached is the warning type RunMainTask records when a
+// declared budget — the tool-request rounds (StopMaxRounds) or the aggregate
+// token budget (StopTokenBudget) — spends the main loop's last round and sends
+// the task into its grace round. Callers publish warnings in their JSON and
+// terminal output, and the warning keeps a spent limit visible even when the
+// grace round completes the task: by design the completion alone would look
+// like an untruncated review.
+const WarningReviewLimitReached = "review_limit_reached"
+
+// recordGraceRoundLimit records which declared budget reached its grace round,
+// and the round's verdict on the task. The verdict is part of the message
+// because completion and its absence send a reader — or a JSON consumer — to
+// opposite conclusions about the same limit.
+func (r *Runner) recordGraceRoundLimit(taskKey string, stop MainLoopStop, completed bool) {
+	outcome := "the grace round did not complete the task"
+	if completed {
+		outcome = "the grace round completed the task"
+	}
+	r.RecordWarning(WarningReviewLimitReached, taskKey, stop.Reason()+"; "+outcome)
 }
 
 // graceRoundToolDefs returns the subset of tool definitions containing only
@@ -730,8 +711,8 @@ func (r *Runner) executeToolCall(ctx context.Context, taskKey string, call llm.T
 	args, err := parseToolArgs(call.Function.Arguments)
 	if err != nil {
 		errMsg := fmt.Sprintf("Error parsing tool arguments for %s: %v", toolName, err)
-		telemetry.PrintToolCallStarted(taskKey, toolName, nil)
-		telemetry.PrintToolCallError(taskKey, toolName, fmt.Errorf("%s", errMsg))
+		telemetry.PrintToolCallStarted(toolName, nil)
+		telemetry.PrintToolCallError(toolName, fmt.Errorf("%s", errMsg))
 		r.recordToolFailure(toolCallNumber, toolName, taskKey, errMsg,
 			rec, call.Function.Arguments, time.Since(callStarted))
 		return r.toolFailureResult(taskKey, toolName, errMsg)
@@ -740,7 +721,7 @@ func (r *Runner) executeToolCall(ctx context.Context, taskKey string, call llm.T
 	startTime := time.Now()
 
 	if t == tool.CodeComment {
-		telemetry.PrintToolCallStarted(taskKey, t.Name(), args)
+		telemetry.PrintToolCallStarted(t.Name(), args)
 		_, toolSpan := telemetry.StartToolSpan(ctx, t.Name())
 
 		comments, repair, errMsg := tool.ParseCommentsWithPath(args, taskKey)
@@ -758,7 +739,7 @@ func (r *Runner) executeToolCall(ctx context.Context, taskKey string, call llm.T
 			telemetry.RecordToolCall(ctx, t.Name(), dur, false)
 			r.recordToolFailure(toolCallNumber, toolName, taskKey, errMsg,
 				rec, call.Function.Arguments, dur)
-			telemetry.PrintToolCallError(taskKey, t.Name(), toolErr)
+			telemetry.PrintToolCallError(t.Name(), toolErr)
 			return r.toolFailureResult(taskKey, toolName, errMsg)
 		}
 
@@ -822,7 +803,6 @@ func (r *Runner) executeToolCall(ctx context.Context, taskKey string, call llm.T
 									atomic.AddInt64(&r.totalOutputTokens, resp.Usage.CompletionTokens)
 									atomic.AddInt64(&r.totalCacheReadTokens, resp.Usage.CacheReadTokens)
 									atomic.AddInt64(&r.totalCacheWriteTokens, resp.Usage.CacheWriteTokens)
-									r.recordTaskUsage(taskKey, resp.Usage)
 								}
 							} else {
 								rlRec.SetError(fmt.Errorf("re-location LLM call failed"), time.Since(rlStart))
@@ -846,7 +826,7 @@ func (r *Runner) executeToolCall(ctx context.Context, taskKey string, call llm.T
 					dur := time.Since(startTime)
 					telemetry.RecordToolResult(toolSpan, toolName, dur.Milliseconds(), nil)
 					toolSpan.End()
-					telemetry.PrintToolCallFinished(taskKey, toolName, dur)
+					telemetry.PrintToolCallFinished(toolName, dur)
 				}()
 				resolveAndCollect(asyncCtx)
 				return []model.LlmComment{}, nil
@@ -861,7 +841,7 @@ func (r *Runner) executeToolCall(ctx context.Context, taskKey string, call llm.T
 		telemetry.RecordToolResult(toolSpan, t.Name(), dur.Milliseconds(), nil)
 		toolSpan.End()
 		telemetry.RecordToolCall(ctx, t.Name(), dur, true)
-		telemetry.PrintToolCallFinished(taskKey, t.Name(), dur)
+		telemetry.PrintToolCallFinished(t.Name(), dur)
 		if rec != nil {
 			rec.AddToolResult(t.Name(), call.Function.Arguments, tool.CommentSucceed)
 		}
@@ -870,7 +850,7 @@ func (r *Runner) executeToolCall(ctx context.Context, taskKey string, call llm.T
 	}
 
 	// Synchronous path for all other tools
-	telemetry.PrintToolCallStarted(taskKey, toolName, args)
+	telemetry.PrintToolCallStarted(toolName, args)
 	_, toolSpan := telemetry.StartToolSpan(ctx, toolName)
 	result, err := p.Execute(ctx, args)
 	dur := time.Since(startTime)
@@ -882,10 +862,10 @@ func (r *Runner) executeToolCall(ctx context.Context, taskKey string, call llm.T
 	if err != nil {
 		r.recordToolFailure(toolCallNumber, toolName, taskKey, err.Error(),
 			rec, call.Function.Arguments, dur)
-		telemetry.PrintToolCallError(taskKey, toolName, err)
+		telemetry.PrintToolCallError(toolName, err)
 		return r.toolFailureResult(taskKey, toolName, fmt.Sprintf("Error executing tool %s: %v", toolName, err))
 	}
-	telemetry.PrintToolCallFinished(taskKey, toolName, dur)
+	telemetry.PrintToolCallFinished(toolName, dur)
 	if rec != nil {
 		rec.AddToolResult(toolName, call.Function.Arguments, result)
 	}
@@ -913,7 +893,7 @@ func (r *Runner) addNextMessage(ctx context.Context, assistantContent string, to
 		if *messages, err = r.runCompression(ctx, *messages, taskKey); err != nil {
 			// Compression failed; continue with over-limit messages — the
 			// post-append check below will retry.
-			progress.Noticef("Memory compression failed: %v\n", err)
+			fmt.Fprintf(stdout.Writer(), "[ocr] Memory compression failed: %v\n", err)
 		}
 	}
 
@@ -932,7 +912,7 @@ func (r *Runner) addNextMessage(ctx context.Context, assistantContent string, to
 		r.cancelPendingCompression(st)
 		var err error
 		if *messages, err = r.runCompression(ctx, *messages, taskKey); err != nil {
-			progress.Noticef("Memory compression failed: %v\n", err)
+			fmt.Fprintf(stdout.Writer(), "[ocr] Memory compression failed: %v\n", err)
 		}
 		finalCount = CountMessagesTokens(*messages)
 	}
