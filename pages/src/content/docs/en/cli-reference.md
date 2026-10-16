@@ -118,7 +118,7 @@ staged + unstaged + untracked changes in the current directory's repo.
 | `--resume <session-id>` | — | — | Resume from a previous compatible range or commit review session. |
 | `--format <fmt>` | `-f` | `text` | `text` (human-readable), `json` (machine-readable comment array), or `sarif` (SARIF 2.1.0 report for GitHub Code Scanning). |
 | `--output <path>` | `-o` | stdout | Write review results to a UTF-8 file (`-` means stdout). Lazily created on first write so failed runs leave existing files untouched. Text format automatically strips ANSI color codes. |
-| `--no-tui` | — | `false` | Print plain `[ocr]` progress lines instead of the live terminal dashboard. The dashboard only starts on an interactive terminal with `--format text` and `--audience human`, so this is only needed to turn it off. |
+| `--tui` | — | `false` | Show the live terminal dashboard instead of plain `[ocr]` progress lines. The dashboard only starts on an interactive terminal with `--format text` and `--audience human`, so this is only needed to turn it on. |
 | `--audience <who>` | — | `human` | `human` streams progress lines (to stderr when `--format` is `json`/`sarif`, so stdout stays a single parseable document); `agent` suppresses progress entirely and prints only the final summary / JSON. |
 | `--background <text>` | `-b` | — | Optional requirement / business context injected into the plan + main prompts. |
 | `--background-file <path>` | `-B` | — | Path to a Markdown file used as review background. Takes precedence over `--background` when both are set. |
@@ -330,7 +330,7 @@ use are unaffected and never see an alternate screen:
 - `--format text`
 - `--audience human`
 
-`--no-tui` turns it off explicitly. The dashboard starts without its own signal
+`--tui` turns it on explicitly. The dashboard starts without its own signal
 handler, so an interrupt that arrives outside it still goes to the run's
 signal handling; `ctrl+c` pressed *inside* the dashboard is handed back to the
 same graceful-shutdown path.

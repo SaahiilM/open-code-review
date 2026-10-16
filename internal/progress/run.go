@@ -31,8 +31,8 @@ type Options struct {
 	// document to stdout. A dashboard cannot own the screen in that case,
 	// because the document has to stay the only thing on stdout.
 	MachineReadable bool
-	// Disabled is the user's explicit opt-out (--no-tui).
-	Disabled bool
+	// Enabled is the user's explicit opt-in (--tui). Without it the run prints plain [ocr] progress lines instead of taking over the terminal.
+	Enabled bool
 	// Color reports the caller's already-resolved --color decision. The
 	// dashboard takes this rather than probing the terminal itself, so that
 	// `--color=never` means never: an explicit opt-out has to reach the one
@@ -74,7 +74,7 @@ type Options struct {
 // the dashboard; the run still gets a live view, drawn plainly.
 func Enabled(o Options) bool {
 	switch {
-	case o.Disabled:
+	case !o.Enabled:
 		return false
 	case o.Audience != "human":
 		return false

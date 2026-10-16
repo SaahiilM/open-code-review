@@ -25,10 +25,10 @@ func TestEnabledRejectsEveryNonInteractiveCase(t *testing.T) {
 		name string
 		opts Options
 	}{
-		{"explicit opt-out", Options{Audience: "human", Disabled: true}},
-		{"agent audience", Options{Audience: "agent"}},
-		{"json output", Options{Audience: "human", MachineReadable: true}},
-		{"sarif output", Options{Audience: "human", MachineReadable: true}},
+		{"not opted in", Options{Audience: "human"}},
+		{"agent audience", Options{Audience: "agent", Enabled: true}},
+		{"json output", Options{Audience: "human", Enabled: true, MachineReadable: true}},
+		{"sarif output", Options{Audience: "human", Enabled: true, MachineReadable: true}},
 	}
 	for _, c := range cases {
 		if Enabled(c.opts) {

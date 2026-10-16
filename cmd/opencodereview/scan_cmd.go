@@ -35,7 +35,7 @@ type scanOptions struct {
 	outputFormat          string
 	audience              string
 	outputPath            string
-	noTUI                 bool
+	tui                   bool
 	background            string
 	concurrency           int
 	concurrentTaskTimeout int
@@ -254,7 +254,7 @@ func executeScan(opts scanOptions) (retErr error) {
 		Provider:        rt.Provider,
 		Audience:        opts.audience,
 		MachineReadable: isMachineReadable(opts.outputFormat),
-		Disabled:        opts.noTUI,
+		Enabled:         opts.tui,
 		Color:           colorOn(),
 		Cancel:          cancelRun,
 		Tokens: func() (int64, int64) {
