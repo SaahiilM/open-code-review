@@ -1191,6 +1191,15 @@ p {
     border: 1px solid var(--border-subtle);
     overflow: hidden;
 }
+/* The agent menu is absolutely positioned and drops below the button, so the
+   group's clipping would cut it off. Lift the clip while one is open, and
+   round the header's own corners to keep the group's shape. */
+.comment-file-group:has(.agent-menu:not([hidden])) {
+    overflow: visible;
+}
+.comment-file-group:has(.agent-menu:not([hidden])) > .comment-file-header {
+    border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+}
 .comment-file-header {
     cursor: pointer;
     padding: 0.75rem 1rem;
@@ -1844,6 +1853,12 @@ nav.breadcrumb a:focus-visible {
     font-size: 0.72rem;
     color: var(--text-muted);
 }
+/* The live region stays in the accessibility tree so a copy is announced, so
+   it is not hidden with display:none; it is empty until it has something to
+   say, and the spacing is added only then. */
+.agent-copied:not(:empty) {
+    margin-left: 0.5rem;
+}
 
 /* ── Collapse all ──
    The heading is a flex row so the control sits opposite the title rather than
@@ -1854,6 +1869,11 @@ nav.breadcrumb a:focus-visible {
     justify-content: space-between;
     gap: 1rem;
     flex-wrap: wrap;
+}
+/* The heading sits in a flex row, where the h3's own bottom margin would
+   become part of the row's height and leave an empty band above the toolbar. */
+.comments-heading h3 {
+    margin: 0;
 }
 
 .collapse-all-btn {

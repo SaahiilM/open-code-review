@@ -59,11 +59,29 @@ func TestSessionPage_AgentActionsCarryContext(t *testing.T) {
 		`data-severity="high"`,
 		`data-branch="feat/x"`,
 		`data-repo="/my/proj"`,
-		`data-content="Null deref on empty input."`,
-		`data-suggestion="const a = x?.y;"`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("agent handoff missing %s", want)
+		}
+	}
+
+	// The finding's text is read from the rendered card rather than shipped
+	// again in an attribute, so it has to be on the page exactly once.
+	for _, want := range []string{
+		`Null deref on empty input.`,
+		`const a = x?.y;`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("session page is missing the finding text %s", want)
+		}
+	}
+	for _, unwanted := range []string{
+		`data-content=`,
+		`data-existing=`,
+		`data-suggestion=`,
+	} {
+		if strings.Contains(body, unwanted) {
+			t.Errorf("session page duplicates the finding text in %s", unwanted)
 		}
 	}
 }
@@ -103,9 +121,10 @@ func TestSessionPage_CollapseAllControlPresent(t *testing.T) {
 	if !strings.Contains(body, `data-collapse-all`) {
 		t.Error("session page has no collapse-all control")
 	}
-	// aria-pressed is what session.js toggles, and what a screen reader reads.
-	if !strings.Contains(body, `aria-pressed="false"`) {
-		t.Error("collapse-all control is missing its initial aria-pressed state")
+	// The label carries the state, so the control must not also carry a toggle
+	// attribute that would announce the opposite state.
+	if strings.Contains(body, `data-collapse-all aria-pressed`) {
+		t.Error("collapse-all control has an aria-pressed state that contradicts its label")
 	}
 }
 

@@ -178,6 +178,7 @@ func TestEmbeddedAssetsHaveNoTerminators(t *testing.T) {
 		{"static/a11y.js", "</script"},
 		{"static/pager.js", "</script"},
 		{"static/session.js", "</script"},
+		{"static/agent.js", "</script"},
 	} {
 		t.Run(tt.path, func(t *testing.T) {
 			b, err := assets.ReadFile(tt.path)

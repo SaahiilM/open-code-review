@@ -112,16 +112,21 @@ document.querySelectorAll('.response-text').forEach(function(el) {
         const button = document.querySelector('[data-collapse-all]');
         if (!button) return;
 
+        // The label is the state: it names the action the button performs, so
+        // it carries the collapsed state on its own. A toggle attribute would
+        // contradict it, since the two would announce the opposite states.
+        let collapsing = false;
+
         button.addEventListener('click', function() {
-            const collapsing = button.getAttribute('aria-pressed') !== 'true';
+            collapsing = !collapsing;
 
             groups.forEach(function(group) {
-                // Skip a group the filters have hidden: toggling it would leave
-                // its open state out of step with what the user can see.
-                if (!group.hidden) group.open = !collapsing;
+                // Every group, including one the filters have hidden: a hidden
+                // group that reappears still open would leave the page in a
+                // state the button's label does not describe.
+                group.open = !collapsing;
             });
 
-            button.setAttribute('aria-pressed', String(collapsing));
             button.textContent = collapsing ? 'Expand all' : 'Collapse all';
         });
     }

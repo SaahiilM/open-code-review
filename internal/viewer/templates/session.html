@@ -114,7 +114,7 @@
 <div class="comments-section">
     <div class="comments-heading">
     <h3>Review Comments <span class="findings-count">({{len .Session.Comments}} findings)</span></h3>
-    <button type="button" class="collapse-all-btn" data-collapse-all aria-pressed="false">Collapse all</button>
+    <button type="button" class="collapse-all-btn" data-collapse-all>Collapse all</button>
     </div>
     <div class="comments-toolbar">
     <div class="toolbar-filters">
@@ -287,32 +287,35 @@
      data-start="{{.Comment.StartLine}}"
      data-end="{{.Comment.EndLine}}"
      data-category="{{.Comment.Category}}"
-     data-severity="{{.Comment.Severity}}"
-     data-content="{{.Comment.Content}}"
-     data-existing="{{.Comment.ExistingCode}}"
-     data-suggestion="{{.Comment.SuggestionCode}}">
-    <button type="button" class="agent-btn" data-agent-menu-toggle aria-haspopup="menu" aria-expanded="false">
+     data-severity="{{.Comment.Severity}}">
+    <button type="button" class="agent-btn" data-agent-menu-toggle aria-expanded="false">
         <span class="agent-btn-label">Fix with agent</span>
         <span class="chevron-sm" aria-hidden="true">{{icon "chevron-down"}}</span>
     </button>
-    <div class="agent-menu" role="menu" hidden>
+    {{/* A plain disclosure list, not an ARIA menu: the menu-button pattern
+         promises arrow-key navigation and focus movement that this does not
+         implement, so the roles are dropped and the button's aria-expanded
+         carries the open state. */}}
+    <div class="agent-menu" hidden>
         <div class="agent-menu-label">App</div>
         {{/* href is a placeholder that agent.js overwrites with the real deep
              link when the menu opens. An anchor without href is not focusable,
              so the attribute stays - the value just must never be followed as
              shipped, hence the inert scheme rather than "#", which would scroll
              the page if it ever were. */}}
-        <a class="agent-menu-item" role="menuitem" data-agent-open="claude-app" href="about:blank">Claude Code</a>
-        <a class="agent-menu-item" role="menuitem" data-agent-open="codex" href="about:blank">Codex</a>
-        <a class="agent-menu-item" role="menuitem" data-agent-open="cursor" href="about:blank">Cursor</a>
-        <div class="agent-menu-sep" role="separator"></div>
+        <a class="agent-menu-item" data-agent-open="claude-app" href="about:blank">Claude Code</a>
+        <a class="agent-menu-item" data-agent-open="codex" href="about:blank">Codex</a>
+        <a class="agent-menu-item" data-agent-open="cursor" href="about:blank">Cursor</a>
+        <div class="agent-menu-sep" aria-hidden="true"></div>
         <div class="agent-menu-label">Editor extension</div>
-        <a class="agent-menu-item" role="menuitem" data-agent-open="claude-vscode" href="about:blank">Claude Code (VS Code)</a>
-        <a class="agent-menu-item" role="menuitem" data-agent-open="vscode-agents" href="about:blank">VS Code agent</a>
-        <div class="agent-menu-sep" role="separator"></div>
-        <button type="button" class="agent-menu-item" role="menuitem" data-agent-copy>Copy prompt for agent</button>
+        <a class="agent-menu-item" data-agent-open="claude-vscode" href="about:blank">Claude Code (VS Code)</a>
+        <a class="agent-menu-item" data-agent-open="vscode-agents" href="about:blank">VS Code agent</a>
+        <div class="agent-menu-sep" aria-hidden="true"></div>
+        <button type="button" class="agent-menu-item" data-agent-copy>Copy prompt for agent</button>
     </div>
-    <span class="agent-copied" data-agent-copied role="status" hidden>Copied</span>
+    {{/* The live region stays in the accessibility tree and only its text
+         changes, so a copy is announced. */}}
+    <span class="agent-copied" data-agent-copied role="status"></span>
 </div>
 {{end}}
 

@@ -18,7 +18,26 @@
     // Documented limits. Claude Code's CLI caps q at 5000 chars and Cursor caps
     // text at 10000 URL-encoded; truncating to the smaller bound everywhere
     // keeps one rule instead of four.
-    const MAX_PROMPT = 4000;
+    //
+    // The bound is on the encoded form, because that is what the vendors
+    // measure: encoding inflates a prompt several times over for non-ASCII
+    // text, so a prompt that fits a raw character budget can still overflow
+    // the limit once it is a query parameter.
+    const MAX_ENCODED = 5000;
+
+    // Appended to a truncated prompt, and the fence close that may precede it.
+    // Both are reserved from the budget so the text that is finally produced
+    // still fits.
+    const TRUNCATION_TAIL = "\n\n[truncated]";
+    const FENCE_TAIL = "\n```";
+
+    // The encoded length of a prompt's value, which is what the vendors
+    // measure. The parameter name differs per target but the value's encoding
+    // does not, so a one-character name is used to keep the overhead at the
+    // two characters of "name=".
+    function encodedLength(text) {
+        return new URLSearchParams({ v: text }).toString().length - 2;
+    }
 
     // Builds the prompt body shared by every target. Kept as plain text with a
     // fenced diff for the code, because these are terminal/chat agents and
@@ -30,6 +49,11 @@
         if (ctx.severity) lines.push(`Severity: ${ctx.severity}`);
         if (ctx.category) lines.push(`Category: ${ctx.category}`);
         lines.push(`File: ${ctx.file}${lineRange(ctx)}`);
+        // The copy-to-clipboard path and two of the deep-link targets carry no
+        // workspace at all, so the repository is named in the prompt itself
+        // rather than left to the receiving agent's working directory.
+        const repo = repoPath(ctx);
+        if (repo) lines.push(`Repository: ${repo}`);
         if (ctx.branch) lines.push(`Branch: ${ctx.branch}`);
         lines.push("");
         lines.push("Finding:");
@@ -49,11 +73,14 @@
             lines.push("```");
         }
         lines.push("");
-        lines.push("Make the change in the repository above. Keep it minimal and match the surrounding style.");
+        lines.push(repo
+            ? "Make the change in the repository above. Keep it minimal and match the surrounding style."
+            : "Make the change. Keep it minimal and match the surrounding style.");
         return clampPrompt(lines.join("\n"));
     }
 
-    // Cuts an over-long prompt to MAX_PROMPT without producing malformed text.
+    // Cuts an over-long prompt to the encoded budget without producing
+    // malformed text.
     //
     // A plain slice does damage in two ways that matter to the agent receiving
     // it: it can land inside a fenced code block and leave the fence unclosed,
@@ -64,21 +91,36 @@
     // So the cut is walked back to a line boundary, never between a high and low
     // surrogate, and an unbalanced fence is closed.
     function clampPrompt(text) {
-        if (text.length <= MAX_PROMPT) return text;
+        const budget = MAX_ENCODED - encodedLength(FENCE_TAIL) - encodedLength(TRUNCATION_TAIL);
+        let cut = text.length;
+        if (encodedLength(text) > budget) {
+            // The encoded length grows with the raw text, so bisecting finds
+            // the longest prefix that fits.
+            let lo = 0;
+            let hi = text.length;
+            while (lo < hi) {
+                const mid = (lo + hi + 1) >> 1;
+                if (encodedLength(text.slice(0, mid)) <= budget) lo = mid;
+                else hi = mid - 1;
+            }
+            cut = lo;
+        }
+        if (cut >= text.length) return text;
 
-        let cut = MAX_PROMPT;
         // Never split a surrogate pair: a high surrogate at the cut point means
         // its partner was cut off.
         if (cut > 0 && isHighSurrogate(text.charCodeAt(cut - 1))) cut--;
         // Prefer a line boundary so the prompt stays readable and a fence is
-        // never cut in half.
+        // never cut in half. The boundary has to be near the cut: walking back
+        // to a newline far above it would drop most of the prompt, which is
+        // worse than landing mid-line.
         const lastNewline = text.lastIndexOf("\n", cut);
-        if (lastNewline > text.length * 0.5) cut = lastNewline;
+        if (lastNewline > cut * 0.5) cut = lastNewline;
 
         let out = text.slice(0, cut).trimEnd();
         // An odd number of fences means the cut landed inside a block.
-        if ((out.match(/```/g) || []).length % 2 !== 0) out += "\n```";
-        out += "\n\n[truncated]";
+        if ((out.match(/```/g) || []).length % 2 !== 0) out += FENCE_TAIL;
+        out += TRUNCATION_TAIL;
         return out;
     }
 
@@ -148,20 +190,45 @@
         },
     };
 
+    // The finding's text is read from the rendered card rather than shipped
+    // again in a data attribute. The panel already holds the code, and a
+    // second copy of it roughly doubled the size of a session page.
     function readContext(el) {
         const d = el.dataset;
+        const card = el.closest("[data-comment-card]");
         return {
             file: d.file || "",
             start: parseInt(d.start, 10) || 0,
             end: parseInt(d.end, 10) || 0,
             category: d.category || "",
             severity: d.severity || "",
-            content: d.content || "",
-            existing: d.existing || "",
-            suggestion: d.suggestion || "",
+            content: textOf(card, ".comment-content"),
+            existing: codeOf(card, ".code-existing"),
+            suggestion: codeOf(card, ".code-suggestion"),
             branch: d.branch || "",
             repo: d.repo || "",
         };
+    }
+
+    function textOf(card, selector) {
+        if (!card) return "";
+        const el = card.querySelector(selector);
+        return el ? el.textContent : "";
+    }
+
+    // The code panel renders one span per line when it shows line numbers, so
+    // the line text has to be joined back together; the numbers themselves are
+    // not part of the code.
+    function codeOf(card, selector) {
+        if (!card) return "";
+        const panel = card.querySelector(selector);
+        if (!panel) return "";
+        const lines = panel.querySelectorAll(".line-text");
+        if (lines.length) {
+            return Array.from(lines, (el) => el.textContent).join("\n");
+        }
+        const pre = panel.querySelector("pre code");
+        return pre ? pre.textContent : "";
     }
 
     async function copyText(text) {
@@ -252,21 +319,24 @@
                 e.preventDefault();
                 const ok = await copyText(buildPrompt(readContext(root)));
                 if (copied) {
+                    // The live region stays in the accessibility tree, so only
+                    // its text changes: a region that is hidden while its
+                    // content changes is not reliably announced.
                     copied.textContent = ok ? "Copied" : "Copy failed";
-                    copied.hidden = false;
                     setTimeout(() => {
-                        copied.hidden = true;
+                        copied.textContent = "";
                     }, 2000);
                 }
                 close();
             });
         }
 
-        // A click anywhere else, or Escape, dismisses the menu. Both are
-        // handled by one delegated listener installed once for the whole page,
-        // not one per finding: a session with hundreds of findings would
+        // A click anywhere else, or Escape, dismisses the menu. The click is
+        // handled by one delegated listener installed once for the whole page
+        // (see bindDismiss below): a session with hundreds of findings would
         // otherwise register hundreds of document-level listeners, all of which
-        // run on every click anywhere in the viewer.
+        // run on every click anywhere in the viewer. The keydown stays scoped
+        // to this finding, because it only fires while focus is inside it.
         root.addEventListener("keydown", (e) => {
             if (e.key === "Escape") {
                 close();
