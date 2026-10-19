@@ -54,7 +54,7 @@ func liveSession(t *testing.T, repoDir string) (*session.SessionHistory, string)
 // died, and it is the one status that can never be true while the review is
 // still going.
 func TestLiveSession_ReportsRunningNotAborted(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setTestHome(t, t.TempDir())
 	repoDir := "/my/proj"
 	sh, path := liveSession(t, repoDir)
 	defer sh.Close()
@@ -79,7 +79,7 @@ func TestLiveSession_ReportsRunningNotAborted(t *testing.T) {
 
 func TestListSessions_ReportsRunningFlag(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	repoDir := "/my/proj"
 	sh, _ := liveSession(t, repoDir)
 	defer sh.Close()
@@ -120,7 +120,7 @@ func TestListSessions_ReportsRunningFlag(t *testing.T) {
 // got to write one.
 func TestSessionEnd_ClearsRunning(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	sh, _ := liveSession(t, "/my/proj")
 
 	if err := sh.Finalize(); err != nil {
@@ -153,7 +153,7 @@ func TestSessionEnd_ClearsRunning(t *testing.T) {
 // Close stands in for a run that gave up: no session_end, lock released. That
 // must read as aborted, not as still running.
 func TestAbandonedRun_ReadsAsAborted(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setTestHome(t, t.TempDir())
 	sh, path := liveSession(t, "/my/proj")
 
 	if err := sh.Close(); err != nil {
@@ -177,7 +177,7 @@ func TestAbandonedRun_ReadsAsAborted(t *testing.T) {
 
 func TestSessionsPage_ShowsRunningNotAborted(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	sh, _ := liveSession(t, "/my/proj")
 	defer sh.Close()
 
@@ -209,7 +209,7 @@ func TestSessionsPage_ShowsRunningNotAborted(t *testing.T) {
 
 func TestSessionPage_MetaShowsRunning(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	sh, _ := liveSession(t, "/my/proj")
 	defer sh.Close()
 
@@ -237,7 +237,7 @@ func TestSessionPage_MetaShowsRunning(t *testing.T) {
 
 func TestReposPage_ShowsActiveSessionLink(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	sh, _ := liveSession(t, "/my/proj")
 	defer sh.Close()
 
@@ -323,7 +323,7 @@ func TestReposPage_NoActiveSessionWhenFinished(t *testing.T) {
 // history and one run in progress reports the run rather than the archive.
 func TestDiscoverRepos_ActiveSessionIsNewestLive(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	repoDir := "/my/proj"
 
 	// Two live runs cannot happen for one working tree in practice, but the
@@ -368,7 +368,7 @@ func TestDiscoverRepos_ActiveSessionIsNewestLive(t *testing.T) {
 // change which session wins.
 func TestDiscoverRepos_LiveRunIsFoundAlongsideManyArchived(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t, home)
 	repoDir := "/my/proj"
 
 	// Archived sessions: each has been finalized, so each still carries the
