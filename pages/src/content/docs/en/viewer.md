@@ -246,8 +246,10 @@ Two things worth knowing:
   interactive prompt, so on a brand-new install the link can silently
   do nothing — the copy action always works.
 
-The prompt is truncated to 4000 characters, comfortably inside the
-smallest documented vendor limit.
+The prompt is truncated to fit the smallest documented vendor limit, which
+each one measures on the URL-encoded value it receives. Encoding inflates
+non-ASCII text several times over, so a long or non-English finding is cut
+shorter than an equivalent one in ASCII.
 
 ## Use cases
 
