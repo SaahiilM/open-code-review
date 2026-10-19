@@ -235,7 +235,7 @@ func registerScanFlags(cmd *cobra.Command, opts *scanOptions) {
 	addToolsFlag(cmd, &opts.toolConfigPath)
 	addRuleFlag(cmd, &opts.rulePath)
 	addRepoFlag(cmd, &opts.repoDir)
-	cmd.Flags().StringVar(&opts.paths, "path", "", "comma-separated repo-relative directories or files to scan (default: whole repo)")
+	cmd.Flags().StringVar(&opts.paths, "path", "", "comma-separated repo-relative directories or files to scan (default: whole repo; nonexistent paths are an error)")
 	addExcludeFlag(cmd, &opts.excludes)
 	addOutputFlags(cmd, &opts.outputFormat, &opts.audience)
 	addTUIFlag(cmd, &opts.tui)
