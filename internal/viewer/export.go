@@ -53,8 +53,15 @@ func ExportSession(out io.Writer, root, encodedRepo, sessionID string) error {
 	if err != nil {
 		return fmt.Errorf("read embedded pager script: %w", err)
 	}
+	// The per-finding agent handoff is part of the page, so an exported copy has
+	// to carry it too.
+	agentJS, err := assets.ReadFile("static/agent.js")
+	if err != nil {
+		return fmt.Errorf("read embedded agent script: %w", err)
+	}
 	js := append(append(append([]byte(nil), a11y...), '\n'), pagerJS...)
 	js = append(append(js, '\n'), sessionJS...)
+	js = append(append(js, '\n'), agentJS...)
 
 	tmpl, err := parseTemplate("session.html")
 	if err != nil {
