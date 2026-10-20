@@ -105,12 +105,17 @@ type Runner struct {
 	totalOutputTokens     int64
 	totalCacheReadTokens  int64
 	totalCacheWriteTokens int64
-	warningsMu            sync.Mutex
-	warnings              []AgentWarning
-	toolCallsMu           sync.Mutex
-	toolCalls             map[string]int64
-	toolCallSequence      int64
-	toolFailures          []ToolFailureDetail
+	// taskTokens tracks what each task has spent, so a per-task total can be
+	// published after every response. The run-wide counters above cannot
+	// attribute spend while several groups run at once; see recordTaskUsage.
+	taskTokensMu     sync.Mutex
+	taskTokens       map[string]*taskUsage
+	warningsMu       sync.Mutex
+	warnings         []AgentWarning
+	toolCallsMu      sync.Mutex
+	toolCalls        map[string]int64
+	toolCallSequence int64
+	toolFailures     []ToolFailureDetail
 	// toolFailureStreak counts each (taskKey, toolName) pair's consecutive
 	// failures; see tool_failure_streak.go.
 	toolFailureStreak toolFailureStreakState
@@ -263,6 +268,46 @@ func (r *Runner) RecordUsage(u *llm.UsageInfo) {
 	atomic.AddInt64(&r.totalOutputTokens, u.CompletionTokens)
 	atomic.AddInt64(&r.totalCacheReadTokens, u.CacheReadTokens)
 	atomic.AddInt64(&r.totalCacheWriteTokens, u.CacheWriteTokens)
+}
+
+// taskUsage is one task's cumulative token spend.
+type taskUsage struct {
+	input  int64
+	output int64
+}
+
+// recordTaskUsage adds one response's usage to the task's running total and
+// publishes that total.
+//
+// The total is published rather than the response's own delta because the
+// dashboard's per-row token column answers "what did this row cost": a task
+// makes several calls, and the last delta would be a fraction of it. The
+// run-wide counters cannot stand in for this — while several groups run at
+// once, they cannot say which group spent what.
+func (r *Runner) recordTaskUsage(taskKey string, u *llm.UsageInfo) {
+	if u == nil {
+		return
+	}
+	r.taskTokensMu.Lock()
+	if r.taskTokens == nil {
+		r.taskTokens = make(map[string]*taskUsage)
+	}
+	t := r.taskTokens[taskKey]
+	if t == nil {
+		t = &taskUsage{}
+		r.taskTokens[taskKey] = t
+	}
+	t.input += u.PromptTokens
+	t.output += u.CompletionTokens
+	input, output := t.input, t.output
+	r.taskTokensMu.Unlock()
+
+	progress.Publish(progress.Event{
+		Kind:         progress.KindUsage,
+		Group:        taskKey,
+		InputTokens:  input,
+		OutputTokens: output,
+	})
 }
 
 // CollectPendingComments awaits any async comment-processing workers and
@@ -449,6 +494,7 @@ func (r *Runner) RunMainTask(ctx context.Context, messages []llm.Message, taskKe
 			atomic.AddInt64(&r.totalOutputTokens, resp.Usage.CompletionTokens)
 			atomic.AddInt64(&r.totalCacheReadTokens, resp.Usage.CacheReadTokens)
 			atomic.AddInt64(&r.totalCacheWriteTokens, resp.Usage.CacheWriteTokens)
+			r.recordTaskUsage(taskKey, resp.Usage)
 		}
 		telemetry.RecordLLMResult(llmSpan, duration, totalTokens, nil)
 		llmSpan.End()
@@ -609,6 +655,7 @@ func (r *Runner) runGraceRound(ctx context.Context, messages []llm.Message, task
 		atomic.AddInt64(&r.totalOutputTokens, resp.Usage.CompletionTokens)
 		atomic.AddInt64(&r.totalCacheReadTokens, resp.Usage.CacheReadTokens)
 		atomic.AddInt64(&r.totalCacheWriteTokens, resp.Usage.CacheWriteTokens)
+		r.recordTaskUsage(taskKey, resp.Usage)
 	}
 	telemetry.RecordLLMResult(llmSpan, duration, totalTokens, nil)
 	llmSpan.End()
