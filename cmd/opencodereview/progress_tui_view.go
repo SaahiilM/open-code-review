@@ -48,11 +48,14 @@ const (
 	// gets the too-small message rather than a frame that does not fit.
 	minFrameWidth  = 40
 	minFrameHeight = 12
-
-	// tooSmallMessage is what a terminal too small for the dashboard is told
-	// instead of being shown a frame that would not fit.
-	tooSmallMessage = "Terminal too small for the dashboard — enlarge it to at least 40x12, or press Ctrl+C to stop."
 )
+
+// tooSmallMessage is what a terminal too small for the dashboard is told
+// instead of being shown a frame that would not fit. It is derived from the
+// floor so it cannot drift from it.
+var tooSmallMessage = fmt.Sprintf(
+	"Terminal too small for the dashboard — enlarge it to at least %dx%d, or press Ctrl+C to stop.",
+	minFrameWidth, minFrameHeight)
 
 // The dashboard shares the palette provider_tui.go declares for the config
 // wizards, so the two terminal interfaces look like one program rather than
