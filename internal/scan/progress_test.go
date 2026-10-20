@@ -198,6 +198,14 @@ func TestDispatchSubtasks_DoneEventCountsTheFindings(t *testing.T) {
 		Usage: &llm.UsageInfo{PromptTokens: 10, TotalTokens: 10},
 	}}}
 
+	sess := session.New(t.TempDir(), "main", "fake", session.SessionOptions{
+		ReviewMode: session.ReviewModeFullScan,
+	})
+	// The session writer holds the file open until it is finalized, and
+	// Windows cannot delete an open file: the temp directory's cleanup fails
+	// without this.
+	t.Cleanup(func() { _ = sess.Finalize() })
+
 	a := NewAgent(Args{
 		Template:          makeTemplateWithFullScan(),
 		LLMClient:         client,
@@ -209,9 +217,7 @@ func TestDispatchSubtasks_DoneEventCountsTheFindings(t *testing.T) {
 		SkipPlan:          true,
 		SkipDedup:         true,
 		SkipSummary:       true,
-		Session: session.New(t.TempDir(), "main", "fake", session.SessionOptions{
-			ReviewMode: session.ReviewModeFullScan,
-		}),
+		Session:           sess,
 	})
 	a.items = []model.ScanItem{item}
 	a.currentDate = "2026-06-26"
