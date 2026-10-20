@@ -269,6 +269,31 @@ func TestErrWriterReachesStderrWithoutTUI(t *testing.T) {
 	}
 }
 
+// The text sink adds the "[ocr] " prefix itself, so a diagnostic that
+// already carries one would show it twice in the dashboard's log. A
+// diagnostic written straight to stderr brings its own prefix, because the
+// diag writer does not add one.
+func TestErrWriterStripsThePrefixForTheDashboardLog(t *testing.T) {
+	rec := &sinkRecorder{}
+	install(t, rec)
+
+	io.WriteString(ErrWriter(), "[ocr] WARNING: direct\n")
+	io.WriteString(ErrWriter(), "no prefix here\n")
+
+	got := rec.all()
+	for _, ev := range got {
+		if strings.HasPrefix(ev.Text, "[ocr] ") {
+			t.Errorf("dashboard log row kept the text sink's prefix: %q", ev.Text)
+		}
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 log rows, got %d", len(got))
+	}
+	if !strings.Contains(got[0].Text, "direct") || !strings.Contains(got[1].Text, "no prefix here") {
+		t.Errorf("dashboard log lost a diagnostic: %q, %q", got[0].Text, got[1].Text)
+	}
+}
+
 func TestPublishStampsAndForwardsAnEvent(t *testing.T) {
 	rec := &sinkRecorder{}
 	install(t, rec)

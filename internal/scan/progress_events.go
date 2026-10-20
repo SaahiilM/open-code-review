@@ -70,7 +70,11 @@ func (a *Agent) publishReusedUpfront() {
 	}
 	reused, findings := 0, 0
 	for _, it := range a.items {
-		item, ok := a.resumeItem(scanItemFingerprint(it))
+		// The cached method, not the package-level function: it looks the
+		// fingerprint up in the map initScanFingerprints already built,
+		// instead of re-hashing every file's bytes for a lookup that
+		// initResumeInfo has already made the same way.
+		item, ok := a.resumeItem(a.scanItemFingerprint(it))
 		if !ok {
 			continue
 		}

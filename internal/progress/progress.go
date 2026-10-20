@@ -215,6 +215,30 @@ func Warningf(format string, a ...any) {
 	Publish(Event{Kind: KindWarning, Text: warningLabel + fmt.Sprintf(format, a...)})
 }
 
+// SetSinkForTest installs s as the sink for subsequent events and returns a
+// function that restores the previous one.
+//
+// It exists so the packages that publish events — internal/agent and
+// internal/scan — can assert in their own tests that the events a run
+// publishes are the ones the dashboard needs. A package-local export_test.go
+// cannot serve that: it is only visible to tests of package progress, and
+// none of the call sites live here.
+//
+// It takes and returns the same unexported sink type, so it adds no
+// repository-external API: the caller can only hand over a function that
+// accepts an Event, which the progress package already exports.
+func SetSinkForTest(s func(Event)) func() {
+	if s == nil {
+		return set(nil)
+	}
+	return set(sinkFunc(s))
+}
+
+// sinkFunc adapts a plain function to the sink interface.
+type sinkFunc func(Event)
+
+func (f sinkFunc) Publish(ev Event) { f(ev) }
+
 // set installs s as the sink for subsequent events and returns a function
 // that restores the previous one. Like stdout.Swap, the restore must run on
 // the same goroutine that called it: nested or concurrent swaps restore in a
@@ -339,5 +363,11 @@ func (d *diagWriter) publishLine(line string) {
 		io.WriteString(os.Stderr, line+"\n")
 		return
 	}
-	Publish(Event{Kind: KindWarning, Text: line + "\n"})
+	// The text sink adds the prefix itself, so a line that already carries
+	// one would show it twice. A diagnostic written straight to stderr
+	// brings its own "[ocr] ", because the diag writer does not add one; the
+	// events published through Noticef and Warningf do not, because the
+	// prefix is the sink's job. Strip it here so the dashboard's log shows
+	// the same rows either way.
+	Publish(Event{Kind: KindWarning, Text: strings.TrimPrefix(line, prefix) + "\n"})
 }

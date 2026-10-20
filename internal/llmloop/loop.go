@@ -16,8 +16,8 @@ import (
 	"github.com/alibaba/open-code-review/internal/diff"
 	"github.com/alibaba/open-code-review/internal/llm"
 	"github.com/alibaba/open-code-review/internal/model"
+	"github.com/alibaba/open-code-review/internal/progress"
 	"github.com/alibaba/open-code-review/internal/session"
-	"github.com/alibaba/open-code-review/internal/stdout"
 	"github.com/alibaba/open-code-review/internal/telemetry"
 	"github.com/alibaba/open-code-review/internal/tool"
 	"github.com/google/uuid"
@@ -458,7 +458,7 @@ func (r *Runner) RunMainTask(ctx context.Context, messages []llm.Message, taskKe
 		calls := resp.ToolCalls()
 
 		if len(calls) == 0 {
-			fmt.Fprintf(stdout.Writer(), "[ocr] No tool calls parsed for %s, retrying...\n", taskKey)
+			progress.Noticef("No tool calls parsed for %s, retrying...\n", taskKey)
 			messages = append(messages, llm.NewTextMessage("user", "You did not successfully call any tools. Please try again or use task_done if finished."))
 			native := resp.Native()
 			reasoning := resp.ReasoningContent()
@@ -509,18 +509,18 @@ func (r *Runner) RunMainTask(ctx context.Context, messages []llm.Message, taskKe
 		if !hasValidResult {
 			consecutiveEmptyRounds++
 			if consecutiveEmptyRounds >= maxConsecutiveEmptyRounds {
-				fmt.Fprintf(stdout.Writer(), "[ocr] Too many empty retries for %s, stopping.\n", taskKey)
+				progress.Noticef("Too many empty retries for %s, stopping.\n", taskKey)
 				stop = StopEmptyRounds
 				break
 			}
-			fmt.Fprintf(stdout.Writer(), "[ocr] No valid tool results for %s, retrying...\n", taskKey)
+			progress.Noticef("No valid tool results for %s, retrying...\n", taskKey)
 		} else {
 			consecutiveEmptyRounds = 0
 		}
 
 		succeed := r.addNextMessage(ctx, content, calls, resp.Native(), thinking, results, &messages, taskKey, st)
 		if !succeed {
-			fmt.Fprintf(stdout.Writer(), "[ocr] Context compression exceeded threshold for %s, stopping.\n", taskKey)
+			progress.Noticef("Context compression exceeded threshold for %s, stopping.\n", taskKey)
 			stop = StopCompression
 			break
 		}
@@ -533,10 +533,10 @@ func (r *Runner) RunMainTask(ctx context.Context, messages []llm.Message, taskKe
 	completed := false
 	switch stop {
 	case StopMaxRounds:
-		fmt.Fprintf(stdout.Writer(), "[ocr] Max tool requests reached for %s.\n", taskKey)
+		progress.Noticef("Max tool requests reached for %s.\n", taskKey)
 		completed = r.runGraceRound(ctx, messages, taskKey, sessionID)
 	case StopTokenBudget:
-		fmt.Fprintf(stdout.Writer(), "[ocr] Token budget exceeded (used %d > budget %d) for %s.\n",
+		progress.Noticef("Token budget exceeded (used %d > budget %d) for %s.\n",
 			r.TotalTokensUsed(), r.deps.MaxTokensBudget, taskKey)
 		completed = r.runGraceRound(ctx, messages, taskKey, sessionID)
 	}
@@ -574,7 +574,7 @@ func (r *Runner) runGraceRound(ctx context.Context, messages []llm.Message, task
 			"No other tools are available. Do not attempt further analysis."))
 
 	if ctx.Err() != nil {
-		fmt.Fprintf(stdout.Writer(), "[ocr] Grace round skipped for %s: context cancelled\n", taskKey)
+		progress.Noticef("Grace round skipped for %s: context cancelled\n", taskKey)
 		return false
 	}
 
@@ -597,7 +597,7 @@ func (r *Runner) runGraceRound(ctx context.Context, messages []llm.Message, task
 		telemetry.RecordLLMResult(llmSpan, duration, 0, err)
 		llmSpan.End()
 		telemetry.RecordLLMRequest(ctx, r.deps.Model, duration, 0, "error")
-		fmt.Fprintf(stdout.Writer(), "[ocr] Grace round LLM error for %s: %v\n", taskKey, err)
+		progress.Noticef("Grace round LLM error for %s: %v\n", taskKey, err)
 		return false
 	}
 
@@ -722,6 +722,7 @@ func (r *Runner) executeToolCall(ctx context.Context, taskKey string, call llm.T
 
 	if t == tool.CodeComment {
 		telemetry.PrintToolCallStarted(t.Name(), args)
+		progress.Publish(progress.Event{Kind: progress.KindToolStart, Group: taskKey, Detail: t.Name()})
 		_, toolSpan := telemetry.StartToolSpan(ctx, t.Name())
 
 		comments, repair, errMsg := tool.ParseCommentsWithPath(args, taskKey)
@@ -851,6 +852,7 @@ func (r *Runner) executeToolCall(ctx context.Context, taskKey string, call llm.T
 
 	// Synchronous path for all other tools
 	telemetry.PrintToolCallStarted(toolName, args)
+	progress.Publish(progress.Event{Kind: progress.KindToolStart, Group: taskKey, Detail: toolName})
 	_, toolSpan := telemetry.StartToolSpan(ctx, toolName)
 	result, err := p.Execute(ctx, args)
 	dur := time.Since(startTime)
@@ -893,7 +895,7 @@ func (r *Runner) addNextMessage(ctx context.Context, assistantContent string, to
 		if *messages, err = r.runCompression(ctx, *messages, taskKey); err != nil {
 			// Compression failed; continue with over-limit messages — the
 			// post-append check below will retry.
-			fmt.Fprintf(stdout.Writer(), "[ocr] Memory compression failed: %v\n", err)
+			progress.Noticef("Memory compression failed: %v\n", err)
 		}
 	}
 
@@ -912,7 +914,7 @@ func (r *Runner) addNextMessage(ctx context.Context, assistantContent string, to
 		r.cancelPendingCompression(st)
 		var err error
 		if *messages, err = r.runCompression(ctx, *messages, taskKey); err != nil {
-			fmt.Fprintf(stdout.Writer(), "[ocr] Memory compression failed: %v\n", err)
+			progress.Noticef("Memory compression failed: %v\n", err)
 		}
 		finalCount = CountMessagesTokens(*messages)
 	}
