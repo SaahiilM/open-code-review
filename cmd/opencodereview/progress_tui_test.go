@@ -912,3 +912,49 @@ func TestRowClearsTheToolWhenTheCallFails(t *testing.T) {
 		t.Errorf("a failed call must not still be named, got %q", note)
 	}
 }
+
+// The bar shares its row with the label, the counter and the legend, and the
+// counter grows with the file count. A bar that assumes a fixed counter width
+// takes cells the counter needs, and the legend — which sits last — is what
+// gets cut off the edge of the frame.
+func TestBarRowKeepsTheLegend(t *testing.T) {
+	for _, files := range []int{7, 999, 12345} {
+		m := testModel(40, 12)
+		m.totalFiles = files
+		m.doneFiles = files
+		row := stripDashboardANSI(m.viewBar())
+		if !strings.Contains(row, "▇ done") {
+			t.Errorf("with %d files the legend is cut off: %q", files, row)
+		}
+	}
+}
+
+// The three segments are measured against what is left of the bar, so they
+// cannot add up to more than the bar has — whatever the counters say.
+func TestBarSegmentsNeverOverflowTheBar(t *testing.T) {
+	m := testModel(100, 12)
+	m.totalFiles = 100
+	m.reusedFiles = 60
+	m.doneFiles = 60
+
+	fill := m.viewBarFill()
+	if got, want := lipgloss.Width(fill), m.barCells()+2; got > want {
+		t.Errorf("the bar is %d cells wide, want at most %d", got, want)
+	}
+}
+
+// One log entry is one row. An entry whose text spans lines would render as
+// two, and the region counts entries rather than lines, so the rows below it
+// would be pushed off the frame.
+func TestLogEntryIsOneRow(t *testing.T) {
+	m := testModel(80, 24)
+	m = feed(m, progress.Event{Kind: progress.KindNotice, Text: "first line\nsecond line\n"})
+
+	row := m.viewLogEntry(m.log[0])
+	if strings.Contains(row, "\n") {
+		t.Errorf("a log entry must not span lines, got %q", row)
+	}
+	if !strings.Contains(row, "first line second line") {
+		t.Errorf("the entry must keep its text, got %q", row)
+	}
+}

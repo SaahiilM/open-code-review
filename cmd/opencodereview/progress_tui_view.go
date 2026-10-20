@@ -153,7 +153,7 @@ func (m dashboardModel) viewBar() string {
 		" ",
 		m.viewBarFill(),
 		" ",
-		m.paint(tuiTitleStyle, fmt.Sprintf("%d/%d", m.finishedFiles(), m.totalFiles)),
+		m.paint(tuiTitleStyle, m.barCounter()),
 		" ",
 		m.viewBarLegend(),
 	)
@@ -177,20 +177,24 @@ func (m dashboardModel) viewBarFill() string {
 		// its result, the second means it is doing the work. Reusing a
 		// monochrome fill made a resumed run look further along than the
 		// effort actually being spent.
-		part := func(n int) int {
+		// Each segment is measured against what is left of the bar, not
+		// against the whole of it. Measuring them all against the total lets
+		// them add up to more than the bar has whenever the counters do not
+		// divide the denominator exactly, and the bar then runs past the
+		// counter and the legend beside it.
+		part := func(n, used int) int {
 			c := int(float64(n) / float64(m.totalFiles) * float64(cells))
 			switch {
 			case c < 0:
-				return 0
-			case c > cells:
-				return cells
-			default:
-				return c
+				c = 0
+			case c > cells-used:
+				c = cells - used
 			}
+			return c
 		}
-		reused := part(m.reusedFiles)
-		done := part(m.doneFiles)
-		failed := part(m.failedFiles)
+		reused := part(m.reusedFiles, 0)
+		done := part(m.doneFiles, reused)
+		failed := part(m.failedFiles, reused+done)
 
 		body = m.paint(tuiReusedStyle, strings.Repeat("█", reused)) +
 			m.paint(tuiDoneStyle, strings.Repeat("█", done)) +
@@ -233,12 +237,24 @@ func (m dashboardModel) viewBarLegend() string {
 	return out
 }
 
+// barLabel is the text that precedes the bar on its row: the label, the two
+// frame glyphs, and the space between them.
+const barLabel = "reviewing  ▕▏ "
+
+// barCounter is the "n/m" count beside the bar. It is a function because the
+// count changes as the run proceeds, and the bar's width has to follow it.
+func (m dashboardModel) barCounter() string {
+	return fmt.Sprintf("%d/%d", m.finishedFiles(), m.totalFiles)
+}
+
 // barCells is how wide the bar may be. It is derived from the terminal rather
 // than fixed, because a fixed bar overflows a narrow window and pushes every
-// region below it off screen. The overhead is "reviewing ", the two frame
-// glyphs, and the "n/m" counter.
+// region below it off screen. What the bar shares its row with is the label,
+// the counter and the legend, and the counter grows with the file count — a run
+// of a thousand files already needs four digits — so none of it can be
+// assumed to be a fixed width.
 func (m dashboardModel) barCells() int {
-	const overhead = len("reviewing  ▕▏ ") + 7
+	overhead := lipgloss.Width(barLabel) + lipgloss.Width(m.barCounter()) + lipgloss.Width(m.viewBarLegend())
 	cells := m.width - overhead
 	switch {
 	case cells > 24:
@@ -490,14 +506,19 @@ func (m dashboardModel) viewLog() string {
 
 func (m dashboardModel) viewLogEntry(e dashboardLogEntry) string {
 	stamp := m.paint(tuiDimStyle, e.stamp)
+	// One entry is one row. The log region counts entries, not rendered
+	// lines, so an entry whose text carries a newline — a tool output that
+	// spans lines, a warning about an error that does — would render as two
+	// rows and push the rows below the region off the frame.
+	text := strings.ReplaceAll(e.text, "\n", " ")
 	var body string
 	switch e.kind {
 	case progress.KindWarning, progress.KindGroupFailed, progress.KindToolError, progress.KindBudgetReached:
-		body = m.paint(tuiWarnStyle, e.text)
+		body = m.paint(tuiWarnStyle, text)
 	case progress.KindGroupStart, progress.KindGroupDone, progress.KindRoundStart, progress.KindSkipped:
-		body = m.paint(tuiDimStyle, e.text)
+		body = m.paint(tuiDimStyle, text)
 	default:
-		body = e.text
+		body = text
 	}
 	return clip("  "+stamp+"  "+body, m.width)
 }
