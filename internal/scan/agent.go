@@ -475,11 +475,14 @@ func (a *Agent) logSelection(decisions []scanSelection) {
 			continue
 		}
 		if decision.item.IsBinary {
-			progress.Noticef("Skipping %s — binary file\n", decision.item.Path)
+			progress.Skipped(decision.item.Path, "binary file",
+				fmt.Sprintf("Skipping %s — binary file\n", decision.item.Path))
 		} else if decision.reason == model.ExcludeSecret {
-			progress.Noticef("Skipping %s — matches a built-in secret path\n", decision.item.Path)
+			progress.Skipped(decision.item.Path, "matches a built-in secret path",
+				fmt.Sprintf("Skipping %s — matches a built-in secret path\n", decision.item.Path))
 		} else {
-			progress.Noticef("Skipping %s — filtered by path/extension rules\n", decision.item.Path)
+			progress.Skipped(decision.item.Path, "filtered by path/extension rules",
+				fmt.Sprintf("Skipping %s — filtered by path/extension rules\n", decision.item.Path))
 		}
 		staticSkipped++
 	}
@@ -492,8 +495,9 @@ func (a *Agent) logSelection(decisions []scanSelection) {
 		if decision.reason != model.ExcludeTooLarge {
 			continue
 		}
-		progress.Noticef("Skipping %s (~%d tokens exceeds 80%% of max_tokens(%d))\n",
-			decision.item.Path, decision.tokens, a.args.Template.MaxTokens)
+		progress.Skipped(decision.item.Path, "exceeds 80% of max_tokens",
+			fmt.Sprintf("Skipping %s (~%d tokens exceeds 80%% of max_tokens(%d))\n",
+				decision.item.Path, decision.tokens, a.args.Template.MaxTokens))
 		largeSkipped++
 	}
 	if largeSkipped > 0 {
@@ -781,6 +785,13 @@ func (a *Agent) dispatchBatch(ctx context.Context, batchIdx int, batch []model.S
 				}
 				return
 			}
+			// Drain this file's comment workers before counting. code_comment
+			// processing runs in worker goroutines, so the count read here
+			// would otherwise be whatever had landed so far, usually nothing.
+			// The review path drains the same way before it counts.
+			if a.args.CommentWorkerPool != nil {
+				a.args.CommentWorkerPool.AwaitKey(it.Path)
+			}
 			publishItemDone(it, len(a.args.CommentCollector.CommentsForPath(it.Path)))
 			checkpointsMu.Lock()
 			checkpoints = append(checkpoints, batchCheckpoint{item: it})
@@ -847,6 +858,10 @@ func (a *Agent) executeSubtask(ctx context.Context, it model.ScanItem) (bool, st
 		if stop == llmloop.StopTokenBudget && a.budgetExceeded.CompareAndSwap(false, true) {
 			a.recordWarning("token_budget_reached", it.Path,
 				fmt.Sprintf("stopped mid-task: used %d tokens exceeds budget %d", a.runner.TotalTokensUsed(), a.args.MaxTokensBudget))
+			// The dashboard promotes this event into its status line, so a
+			// run that was cut short mid-task says so rather than finishing
+			// with no mention of the budget.
+			publishBudgetReached()
 		}
 		// Scan sessions opt out of the run manifest, so this one string is the
 		// whole diagnostic: it feeds both RecordReviewItemFailed and the

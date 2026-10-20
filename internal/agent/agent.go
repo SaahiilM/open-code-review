@@ -697,7 +697,7 @@ dispatchLoop:
 				firstPath := group.Diffs[0].NewPath
 				progress.Noticef("token budget reached (used %s + group est %s = projected %s > budget %s) — skipping group %q and remaining\n",
 					humanTokens(used), humanTokens(groupEst), humanTokens(projected), humanTokens(a.args.MaxTokensBudget), group.Label)
-				publishBudgetReached("token budget reached — dispatch stopped at group %q\n", group.Label)
+				publishBudgetReached()
 				a.recordWarning("token_budget_reached", firstPath,
 					fmt.Sprintf("stopped dispatch: used %d tokens + group estimate %d = projected %d exceeds budget %d", used, groupEst, projected, a.args.MaxTokensBudget))
 				a.budgetExceeded.Store(true)
@@ -779,7 +779,30 @@ dispatchLoop:
 				return
 			}
 			if !completed {
-				if stop != nil {
+				// A group that stopped short still owes the dashboard a terminal
+				// state. Without one its row keeps spinning and its files never
+				// advance the bar, so a finished run reports less than 100%
+				// covered and leaves a non-zero in-flight count.
+				//
+				// The split is by what each file produced: a file that has
+				// comments is done, the rest failed.
+				var doneCount, failedCount int
+				var findings int
+				for _, d := range g.Diffs {
+					comments := a.args.CommentCollector.CommentsForPath(d.NewPath)
+					if len(comments) > 0 {
+						doneCount++
+						findings += len(comments)
+					} else {
+						failedCount++
+					}
+					if stop == nil {
+						// No stop reason to record against: the session sweeps
+						// these files at finalize, and the dashboard still needs
+						// the terminal state, which is what the counts above are
+						// for.
+						continue
+					}
 					// A group that stopped short of task_done may still have produced
 					// usable output for some of its files before the round/token
 					// budget ran out. Classify per file rather than per group so a
@@ -787,34 +810,47 @@ dispatchLoop:
 					// Failed — otherwise a single stuck file drags its whole group
 					// (and, when nothing else was dispatched, the whole run) down to
 					// terminal_state=failed even though real coverage exists.
-					var failedCount int64
-					for _, d := range g.Diffs {
-						fingerprint := reviewItemFingerprint(a.reviewMode(), d)
-						if comments := a.args.CommentCollector.CommentsForPath(d.NewPath); len(comments) > 0 {
-							a.markCompleted(d)
-							a.session.RecordReviewItemDone(d.NewPath, d.OldPath, d.NewPath, fingerprint, comments)
-							continue
-						}
-						a.markFailed(d, stop.class, stop.reason)
-						if stop.checkpoint != "" {
-							a.session.RecordReviewItemFailed(d.NewPath, d.OldPath, d.NewPath, fingerprint, stop.checkpoint)
-						}
-						failedCount++
+					fingerprint := reviewItemFingerprint(a.reviewMode(), d)
+					if len(comments) > 0 {
+						a.markCompleted(d)
+						a.session.RecordReviewItemDone(d.NewPath, d.OldPath, d.NewPath, fingerprint, comments)
+						continue
 					}
+					a.markFailed(d, stop.class, stop.reason)
+					if stop.checkpoint != "" {
+						a.session.RecordReviewItemFailed(d.NewPath, d.OldPath, d.NewPath, fingerprint, stop.checkpoint)
+					}
+				}
+				if stop != nil {
 					// subtaskFailed must count only the files actually marked failed
 					// above, not the whole group — a group can mix Completed and
 					// Failed files, and reportAsError itself is a group-level signal
 					// (any file with comments suppresses it) that must not be assumed
 					// to imply failedCount == len(g.Diffs).
 					if stop.reportAsError && failedCount > 0 {
-						atomic.AddInt64(&a.subtaskFailed, failedCount)
+						atomic.AddInt64(&a.subtaskFailed, int64(failedCount))
 						stopErr := errors.New(stop.checkpoint)
 						progress.Noticef("Subtask error for group %q: %v\n", g.Label, stopErr)
 						publishGroupFailed(fileGroupKey(g.Diffs), len(g.Diffs), stopErr.Error())
 						telemetry.ErrorEvent(groupCtx, "subtask.error", stopErr,
 							telemetry.AnyToAttr("group.label", g.Label))
 						a.recordWarning("subtask_error", g.Label, stopErr.Error())
+						return
 					}
+				}
+				// The group is one row, so its files are accounted for in two
+				// events: the ones that produced comments are done, the rest
+				// failed. Both are needed for the bar to reach the group's full
+				// file count.
+				if doneCount > 0 {
+					publishGroupDoneFiles(fileGroupKey(g.Diffs), doneCount, findings)
+				}
+				if failedCount > 0 {
+					reason := "group stopped before completing"
+					if stop != nil {
+						reason = stop.reason
+					}
+					publishGroupFailed(fileGroupKey(g.Diffs), failedCount, reason)
 				}
 				return
 			}

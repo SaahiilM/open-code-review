@@ -4,8 +4,6 @@
 package agent
 
 import (
-	"fmt"
-
 	"github.com/alibaba/open-code-review/internal/progress"
 )
 
@@ -45,10 +43,17 @@ func publishGroupStart(g FileGroup) {
 // every file's comments, and CommentsForPath allocates a fresh slice per call,
 // so recounting would be a second pass over the whole comment store.
 func (a *Agent) publishGroupDone(g FileGroup, findings int) {
+	publishGroupDoneFiles(fileGroupKey(g.Diffs), len(g.Diffs), findings)
+}
+
+// publishGroupDoneFiles reports the files of a group that completed. It takes
+// the file count explicitly because a group that stopped short accounts for
+// its files in two events: the ones that finished, and the ones that did not.
+func publishGroupDoneFiles(key string, files, findings int) {
 	progress.Publish(progress.Event{
 		Kind:     progress.KindGroupDone,
-		Group:    fileGroupKey(g.Diffs),
-		Files:    len(g.Diffs),
+		Group:    key,
+		Files:    files,
 		Findings: findings,
 	})
 }
@@ -76,9 +81,10 @@ func publishRoundStart(key string, round int) {
 // publishBudgetReached reports that dispatch has stopped because the run hit
 // a budget. The dashboard promotes this into its status line, because it is
 // the one event that changes what the finished report will say.
-func publishBudgetReached(format string, a ...any) {
-	progress.Publish(progress.Event{
-		Kind: progress.KindBudgetReached,
-		Text: fmt.Sprintf(format, a...),
-	})
+//
+// The event carries no text: the run already printed the budget line where
+// the fact became known, and the plain-text sink would print it a second
+// time here. Piped runs are promised the same bytes they always had.
+func publishBudgetReached() {
+	progress.Publish(progress.Event{Kind: progress.KindBudgetReached})
 }

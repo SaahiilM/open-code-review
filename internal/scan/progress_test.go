@@ -4,11 +4,17 @@
 package scan
 
 import (
+	"context"
 	"strings"
 	"testing"
 
+	"github.com/alibaba/open-code-review/internal/config/template"
+	"github.com/alibaba/open-code-review/internal/llm"
+	"github.com/alibaba/open-code-review/internal/llmloop"
 	"github.com/alibaba/open-code-review/internal/model"
 	"github.com/alibaba/open-code-review/internal/progress"
+	"github.com/alibaba/open-code-review/internal/session"
+	"github.com/alibaba/open-code-review/internal/tool"
 )
 
 // The scan's progress events are the dashboard's only view of a running scan.
@@ -100,5 +106,136 @@ func TestScanProgressTextHasNoPrefix(t *testing.T) {
 	}
 	if strings.HasPrefix(got[0].Text, "[ocr] ") {
 		t.Errorf("scan line carries the text sink's prefix: %q", got[0].Text)
+	}
+}
+
+// The dashboard collapses a run of identically-reasoned skips into one row
+// and counts them in the skipped counter. That only happens when the skip
+// arrives as a skip event: a plain notice is just another line in the log.
+func TestLogSelectionPublishesSkipsAsSkipEvents(t *testing.T) {
+	a := &Agent{args: Args{Template: template.ScanTemplate{MaxTokens: 1000}}}
+	decisions := []scanSelection{
+		{item: model.ScanItem{Path: "a.go", IsBinary: true}, reason: model.ExcludeBinary},
+		{item: model.ScanItem{Path: "b.go"}, reason: model.ExcludeSecret},
+		{item: model.ScanItem{Path: "c.go"}, reason: model.ExcludeExtension},
+	}
+
+	got := captureProgress(t, func() { a.logSelection(decisions) })
+
+	var skips []progress.Event
+	for _, ev := range got {
+		if ev.Kind == progress.KindSkipped {
+			skips = append(skips, ev)
+		}
+	}
+	if len(skips) != 3 {
+		t.Fatalf("expected 3 skip events, got %d: %+v", len(skips), got)
+	}
+	want := []struct{ path, reason string }{
+		{"a.go", "binary file"},
+		{"b.go", "matches a built-in secret path"},
+		{"c.go", "filtered by path/extension rules"},
+	}
+	for i, w := range want {
+		if skips[i].Detail != w.path {
+			t.Errorf("skip %d detail = %q, want %q", i, skips[i].Detail, w.path)
+		}
+		if skips[i].SkipReason != w.reason {
+			t.Errorf("skip %d reason = %q, want %q", i, skips[i].SkipReason, w.reason)
+		}
+	}
+}
+
+// The skip event's own text is what the plain sink prints, so it has to be
+// the line the scan has always printed — same bytes, no second prefix.
+func TestSkippedEventTextMatchesThePrintedLine(t *testing.T) {
+	a := &Agent{args: Args{Template: template.ScanTemplate{MaxTokens: 1000}}}
+	decisions := []scanSelection{
+		{item: model.ScanItem{Path: "a.go"}, reason: model.ExcludeExtension},
+	}
+
+	got := captureProgress(t, func() { a.logSelection(decisions) })
+
+	var skip *progress.Event
+	for i, ev := range got {
+		if ev.Kind == progress.KindSkipped {
+			skip = &got[i]
+			break
+		}
+	}
+	if skip == nil {
+		t.Fatalf("expected a skip event, got %+v", got)
+	}
+	if want := "Skipping a.go — filtered by path/extension rules\n"; skip.Text != want {
+		t.Errorf("skip text = %q, want %q", skip.Text, want)
+	}
+}
+
+// The dashboard's findings counter is how many comments a file produced. The
+// scan reads that count after the comment workers have drained, so the count
+// is the file's real count rather than whatever had landed so far — the
+// workers that add the comments run on their own goroutines.
+func TestDispatchSubtasks_DoneEventCountsTheFindings(t *testing.T) {
+	setTestHome(t, t.TempDir())
+	item := model.ScanItem{Path: "a.go", Content: "package a\n", LineCount: 1}
+	collector := tool.NewCommentCollector()
+	reg := tool.NewRegistry()
+	reg.Register(&tool.CodeCommentProvider{Collector: collector})
+	pool := llmloop.NewCommentWorkerPool(2)
+
+	client := &fakeScanClient{responses: []*llm.ChatResponse{{
+		Choices: []llm.Choice{{
+			Message: llm.ResponseMessage{Role: "assistant", ToolCalls: []llm.ToolCall{
+				{ID: "1", Type: "function", Function: llm.FunctionCall{
+					Name:      "code_comment",
+					Arguments: `{"comments":[{"path":"a.go","content":"missing a nil check"}]}`,
+				}},
+				{ID: "2", Type: "function", Function: llm.FunctionCall{Name: "task_done", Arguments: "{}"}},
+			}},
+			FinishReason: "tool_calls",
+		}},
+		Model: "fake",
+		Usage: &llm.UsageInfo{PromptTokens: 10, TotalTokens: 10},
+	}}}
+
+	a := NewAgent(Args{
+		Template:          makeTemplateWithFullScan(),
+		LLMClient:         client,
+		Model:             "fake",
+		CommentCollector:  collector,
+		CommentWorkerPool: pool,
+		Tools:             reg,
+		MaxConcurrency:    1,
+		SkipPlan:          true,
+		SkipDedup:         true,
+		SkipSummary:       true,
+		Session: session.New(t.TempDir(), "main", "fake", session.SessionOptions{
+			ReviewMode: session.ReviewModeFullScan,
+		}),
+	})
+	a.items = []model.ScanItem{item}
+	a.currentDate = "2026-06-26"
+
+	// The count the event carries must be the count the collector holds by
+	// the time the event is published: the file's comments are added by the
+	// pool's workers, so reading before they drain would report zero.
+	var published, held int
+	restore := progress.SetSinkForTest(func(ev progress.Event) {
+		if ev.Kind == progress.KindGroupDone {
+			published = ev.Findings
+			held = len(collector.CommentsForPath(ev.Group))
+		}
+	})
+	defer restore()
+
+	if _, err := a.dispatchSubtasks(context.Background()); err != nil {
+		t.Fatalf("dispatchSubtasks: %v", err)
+	}
+
+	if published == 0 {
+		t.Error("the done event must carry the file's findings, got 0")
+	}
+	if published != held {
+		t.Errorf("done event carries %d findings, but the collector holds %d", published, held)
 	}
 }
