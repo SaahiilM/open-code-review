@@ -278,7 +278,7 @@ unit of concurrent work showing which round it is on and what tool it is
 calling right now, and a scrolling activity log with timestamps.
 
 ```
-ocr review  …ev/open-code-review   anthropic/claude-opus-4-6 [▲3.8M ▼412k]  09:00
+ocr review  …ev/open-code-review   anthropic/claude-opus-4-6 [▲3.8M ▼412k]  9m00s
 reviewing ▕████████████░░░░░░░░▏ 292/487  ▇ reused ▇ done ▇ failed
 143 findings · 1 in flight · 240 reused · 12 failed · 272 skipped · session 3ee6cd77-…
 work (17)                                     4 running · 13 done (c)

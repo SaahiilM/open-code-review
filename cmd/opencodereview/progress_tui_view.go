@@ -127,7 +127,7 @@ func (m dashboardModel) viewHeader() string {
 	if m.subtitle != "" {
 		left += "  " + m.paint(tuiDimStyle, m.subtitle)
 	}
-	right := m.paint(tuiDimStyle, elapsed(time.Since(m.startedAt)))
+	right := m.paint(tuiDimStyle, humanDuration(int64(time.Since(m.startedAt).Seconds())))
 	ident := identity(m.provider, m.modelName)
 	if ident == "" {
 		return joinEnds(m.width, left, right)
@@ -639,13 +639,6 @@ func identity(provider, dashboardModel string) string {
 	default:
 		return provider
 	}
-}
-
-func elapsed(d time.Duration) string {
-	if d < 0 {
-		d = 0
-	}
-	return fmt.Sprintf("%02d:%02d", int(d.Minutes()), int(d.Seconds())%60)
 }
 
 func shortDuration(d time.Duration) string {

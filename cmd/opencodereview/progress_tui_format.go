@@ -14,6 +14,11 @@ import (
 // while the leading digit is single, drop it once there are two or more, and
 // step up to M at a million.
 //
+// This differs from the abbreviation the [ocr] progress lines use, and
+// deliberately so: that one rounds, so 3800 tokens print as "4K" in the log
+// and as "3.8k" here. The dashboard is the dense surface, and the digit is
+// worth the extra character.
+//
 //	380      -> "380"      999      -> "999"
 //	1_000    -> "1k"       3_800    -> "3.8k"
 //	12_400   -> "12k"      123_000  -> "123k"
@@ -47,8 +52,11 @@ func trimZero(f float64) string {
 	return strings.TrimSuffix(s, ".")
 }
 
-// humanDuration is the same idea for elapsed time: seconds below a minute,
-// then m:ss, so a row's two columns stay narrow and comparable.
+// humanDuration formats a run's elapsed time for the dashboard's header:
+// seconds below a minute, then m:ss, and hours once it is reached. It is the
+// same spelling the summary line at the end of a run uses, so the number a
+// user watches tick up is the number they read at the end, and a run longer
+// than an hour reads as hours rather than as minutes past sixty.
 func humanDuration(seconds int64) string {
 	switch {
 	case seconds < 0:

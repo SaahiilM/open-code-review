@@ -422,11 +422,11 @@ func TestLogWindowFollowsTheTail(t *testing.T) {
 }
 
 func TestHelpers(t *testing.T) {
-	if got := elapsed(90 * time.Second); got != "01:30" {
-		t.Errorf("elapsed(90s) = %q, want 01:30", got)
+	if got := humanDuration(90); got != "1m30s" {
+		t.Errorf("humanDuration(90s) = %q, want 1m30s", got)
 	}
-	if got := elapsed(-time.Second); got != "00:00" {
-		t.Errorf("elapsed must not go negative, got %q", got)
+	if got := humanDuration(-1); got != "0s" {
+		t.Errorf("humanDuration must not go negative, got %q", got)
 	}
 	if got := shortDuration(500 * time.Millisecond); got != "<1s" {
 		t.Errorf("shortDuration(500ms) = %q", got)
