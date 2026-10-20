@@ -74,7 +74,10 @@ func DiscoverRepos(root string) ([]RepoInfo, error) {
 		// first keeps the cost at one open per *candidate* rather than one per
 		// archived session, which is what makes this safe for a repository with
 		// thousands of them.
-		hasSidecar := make(map[string]bool, len(subEntries))
+		// Sized for the locks, not for the directory: most of a repository's
+		// sessions are archived, and reserving room for all of them would
+		// allocate a map far larger than the one or two entries it holds.
+		hasSidecar := make(map[string]bool)
 		for _, se := range subEntries {
 			if strings.HasSuffix(se.Name(), ".lock") {
 				hasSidecar[strings.TrimSuffix(se.Name(), ".lock")+".jsonl"] = true

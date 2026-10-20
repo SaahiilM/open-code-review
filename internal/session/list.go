@@ -177,7 +177,12 @@ func LoadDetail(repoDir, sessionID string) (*Summary, []ItemDetail, error) {
 	if summary.SessionID == "" {
 		summary.SessionID = sessionID
 	}
-	summary.Running = SessionIsActive(path)
+	// Only a session without a session_end record can still be running, and
+	// the probe costs an open and a lock attempt. A repository with thousands
+	// of finished sessions would pay that for every one of them.
+	if summary.Aborted {
+		summary.Running = SessionIsActive(path)
+	}
 	return summary, items, nil
 }
 
@@ -196,7 +201,11 @@ func loadSummaryFromFile(path, sessionID, repoDir string) (*Summary, error) {
 	if summary.SessionID == "" {
 		summary.SessionID = sessionID
 	}
-	summary.Running = SessionIsActive(path)
+	// As above: a session that has ended cannot be running, and this one is
+	// called once per session in a listing.
+	if summary.Aborted {
+		summary.Running = SessionIsActive(path)
+	}
 	return summary, nil
 }
 

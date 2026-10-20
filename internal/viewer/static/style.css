@@ -1965,6 +1965,8 @@ nav.breadcrumb a:focus-visible {
 .session-status.status-legacy { color: var(--text-muted); font-weight: 500; }
 .session-status.status-complete { color: var(--link); }
 .session-status.status-failed { color: var(--danger); }
+.session-status.status-partial { color: var(--badge-duration-fg); }
+.session-status.status-skipped { color: var(--text-muted); font-weight: 500; }
 
 .repo-active {
     display: inline-flex;
