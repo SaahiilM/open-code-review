@@ -223,8 +223,9 @@ read-only:
 ### Handing a finding to a coding agent
 
 **Fix with agent** opens a menu that carries one finding — its file,
-line range, severity, category, description, and both versions of the
-code — into whichever agent you use, prefilled and ready to send:
+line range, severity, category, description, both versions of the code,
+and the repository path — into whichever agent you use, prefilled and
+ready to send:
 
 | Target | Opens |
 |---|---|
