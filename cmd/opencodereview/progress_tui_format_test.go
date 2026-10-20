@@ -113,7 +113,7 @@ func TestRunningRowKeepsTokensBeforeAnyRoundOrTool(t *testing.T) {
 func TestHelpNamesTheFocusedPane(t *testing.T) {
 	m := testModel(80, 24)
 	if !strings.Contains(m.paint(tuiDimStyle, strings.Join(m.helpKeys(), " ")), "work") {
-		t.Error("the scroll hint must name the work dashboardPane when it is focused")
+		t.Error("the scroll hint must name the work pane when it is focused")
 	}
 	m.focus = dashboardPaneActivity
 	if !strings.Contains(m.paint(tuiDimStyle, strings.Join(m.helpKeys(), " ")), "log") {

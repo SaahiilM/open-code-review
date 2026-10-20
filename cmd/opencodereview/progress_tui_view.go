@@ -508,7 +508,7 @@ func (m dashboardModel) viewLogEntry(e dashboardLogEntry) string {
 func (m dashboardModel) helpKeys() []string {
 	return []string{
 		"q detach",
-		"tab dashboardPane",
+		"tab pane",
 		"↑↓ " + m.focusName(),
 		"c completed",
 		"p pause log",

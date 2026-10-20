@@ -271,12 +271,12 @@ func TestWorkPaneScrolls(t *testing.T) {
 func TestPaneFocusSwitches(t *testing.T) {
 	m := testModel(80, 24)
 	if m.focus != dashboardPaneWork {
-		t.Fatalf("the work dashboardPane starts focused, got %v", m.focus)
+		t.Fatalf("the work pane starts focused, got %v", m.focus)
 	}
 	upd, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	m = upd.(dashboardModel)
 	if m.focus != dashboardPaneActivity {
-		t.Error("tab must move focus to the activity dashboardPane")
+		t.Error("tab must move focus to the activity pane")
 	}
 	// With the activity pane focused, scrolling must move the log, not the
 	// work list.
@@ -288,10 +288,10 @@ func TestPaneFocusSwitches(t *testing.T) {
 	upd, _ = m.Update(tea.KeyPressMsg{Code: 'k', Text: "k"})
 	m = upd.(dashboardModel)
 	if m.logOffset == 0 {
-		t.Error("with the activity dashboardPane focused, k must scroll the log")
+		t.Error("with the activity pane focused, k must scroll the log")
 	}
 	if m.workTop != 0 {
-		t.Error("and must not scroll the work dashboardPane")
+		t.Error("and must not scroll the work pane")
 	}
 }
 
@@ -337,7 +337,7 @@ func TestViewSkipsFullWidthOutputWhenDetached(t *testing.T) {
 	m := feed(testModel(80, 24), progress.Event{Kind: progress.KindNotice, Text: "x\n"})
 	m.detached = true
 	if got := m.View().Content; got != "" {
-		t.Errorf("a detached dashboardModel must render nothing, got %q", got)
+		t.Errorf("a detached dashboard must render nothing, got %q", got)
 	}
 }
 
@@ -441,7 +441,7 @@ func TestHelpers(t *testing.T) {
 		t.Errorf("identity with no provider = %q", got)
 	}
 	if got := identity("anthropic", ""); got != "anthropic" {
-		t.Errorf("identity with no dashboardModel = %q", got)
+		t.Errorf("identity with no model = %q", got)
 	}
 	if got := shortenPath("/a/b/c/d.go", 40); got != "/a/b/c/d.go" {
 		t.Errorf("a short path must not be truncated, got %q", got)
