@@ -56,9 +56,13 @@ type dashboardItem struct {
 	took     time.Duration
 	findings int
 	err      string
-	// tokens is what this unit of work has spent, republished as cumulative
-	// totals after every LLM response so the row is live rather than final.
-	tokens int64
+	// inputTokens and outputTokens are what this unit of work has spent,
+	// republished as cumulative totals after every LLM response so the row is
+	// live rather than final. They are kept apart because the header shows
+	// the run's input and output the same way, and a row that carried their
+	// sum under the input arrow read as more than the whole run had spent.
+	inputTokens  int64
+	outputTokens int64
 }
 
 // display is the short form of the row's subject: the first file, which is what
@@ -437,7 +441,8 @@ func (m *dashboardModel) apply(ev progress.Event) {
 		// Cumulative totals from the pipeline, not deltas: the row shows what
 		// the group has spent in total, which is also what the header sums.
 		if it := m.lookup(ev.Group); it != nil {
-			it.tokens = ev.InputTokens + ev.OutputTokens
+			it.inputTokens = ev.InputTokens
+			it.outputTokens = ev.OutputTokens
 		}
 	}
 

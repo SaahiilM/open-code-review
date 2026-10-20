@@ -282,10 +282,10 @@ ocr review  …ev/open-code-review   anthropic/claude-opus-4-6 [▲3.8M ▼412k]
 reviewing ▕████████████░░░░░░░░▏ 292/487  ▇ reused ▇ done ▇ failed
 143 findings · 1 in flight · 240 reused · 12 failed · 272 skipped · session 3ee6cd77-…
 work (17)                                     4 running · 13 done (c)
-  ⣾ internal/agent/agent.go       round 2 · file_read "internal/agen… · ▲93.2k
+  ⣾ internal/agent/agent.go       round 2 · file_read "internal/agen… · ▲93.2k ▼8.1k
   ⣾ internal/scan/agent.go        round 1 · code_search "budget" · ▲41k
 completed (13)
-  ✓ pages/src/content/docs/en/cli-ref.md   2 findings · 4.1s · 214k
+  ✓ pages/src/content/docs/en/cli-ref.md   2 findings · 4.1s · ▲196k ▼18k
   ✗ internal/llm/resolver.go               context deadline exceeded · 18k
 activity (214)                                              following
   01:10:02  ▶ file_read "internal/agent/agent.go"
@@ -295,10 +295,12 @@ q detach  ·  tab pane  ·  ↑↓ work  ·  c completed  ·  p pause log  ·  c
 ```
 
 Token counts appear in two places: beside the model name as the run's
-cumulative `▲` input and `▼` output, and per row as what that group has spent.
-They are abbreviated the way `btop` abbreviates its own counters — `3.8k`,
-`123k`, `1.1M`. The per-group numbers are attributed per task key, so a row
-carries only the tokens it actually spent, not a share of the run total.
+cumulative total, and per row as what that group has spent. The arrows mean
+the same thing in both — `▲` is input and `▼` is output — so a row's numbers
+can be read against the run's without a second guess. They are abbreviated the
+way `btop` abbreviates its own counters — `3.8k`, `123k`, `1.1M`. The per-group
+numbers are attributed per task key, so a row carries only the tokens it
+actually spent, not a share of the run total.
 
 The progress bar is segmented rather than a single fill, and the legend names
 each segment: **reused** (files carried over from a resumed session's

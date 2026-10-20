@@ -271,25 +271,25 @@ func (m dashboardModel) barCells() int {
 func (m dashboardModel) viewStats() string {
 	parts := []string{
 		m.paint(tuiOKStyle, fmt.Sprintf("%d findings", m.findings)),
-		m.paint(tuiDimStyle, "·"),
+		m.paint(tuiDimStyle, " · "),
 		m.paint(tuiBusyStyle, fmt.Sprintf("%d in flight", m.countRunning())),
 	}
 	if m.reusedFiles > 0 {
-		parts = append(parts, m.paint(tuiDimStyle, "·"), m.paint(tuiReusedStyle, fmt.Sprintf("%d reused", m.reusedFiles)))
+		parts = append(parts, m.paint(tuiDimStyle, " · "), m.paint(tuiReusedStyle, fmt.Sprintf("%d reused", m.reusedFiles)))
 	}
 	if m.failedFiles > 0 {
-		parts = append(parts, m.paint(tuiDimStyle, "·"), m.paint(tuiErrorStyle, fmt.Sprintf("%d failed", m.failedFiles)))
+		parts = append(parts, m.paint(tuiDimStyle, " · "), m.paint(tuiErrorStyle, fmt.Sprintf("%d failed", m.failedFiles)))
 	}
 	if m.skippedFiles > 0 {
-		parts = append(parts, m.paint(tuiDimStyle, "·"), m.paint(tuiWarnStyle, fmt.Sprintf("%d skipped", m.skippedFiles)))
+		parts = append(parts, m.paint(tuiDimStyle, " · "), m.paint(tuiWarnStyle, fmt.Sprintf("%d skipped", m.skippedFiles)))
 	}
 	// The one thing that must never be buried: a run that is about to stop
 	// early has to say so in the status line, not only in the log.
 	if m.budgetHit {
-		parts = append(parts, m.paint(tuiDimStyle, "·"), m.paint(tuiWarnStyle, "token budget reached — stopping early"))
+		parts = append(parts, m.paint(tuiDimStyle, " · "), m.paint(tuiWarnStyle, "token budget reached — stopping early"))
 	}
 	if m.paused {
-		parts = append(parts, m.paint(tuiDimStyle, "·"), m.paint(tuiWarnStyle, "log paused"))
+		parts = append(parts, m.paint(tuiDimStyle, " · "), m.paint(tuiWarnStyle, "log paused"))
 	}
 	row := lipgloss.JoinHorizontal(lipgloss.Top, parts...)
 
@@ -299,12 +299,12 @@ func (m dashboardModel) viewStats() string {
 	// against the dashboard.
 	if m.sessionID != "" {
 		id := m.sessionID
-		budget := m.width - lipgloss.Width(row) - len("· session ")
+		budget := m.width - lipgloss.Width(row) - len(" · session ")
 		if budget > 8 {
 			if len(id) > budget {
 				id = "…" + id[len(id)-budget+1:]
 			}
-			row += m.paint(tuiDimStyle, "· session ") + m.paint(tuiDimStyle, id)
+			row += m.paint(tuiDimStyle, " · session ") + m.paint(tuiDimStyle, id)
 		}
 	}
 	return clip(row, m.width)
@@ -439,7 +439,7 @@ func (m dashboardModel) viewItem(it *dashboardItem, frame string) string {
 // then the two numbers that tell the story of the cost.
 func (m dashboardModel) costLine(it *dashboardItem) string {
 	return fmt.Sprintf("%d findings · %s · %s",
-		it.findings, shortDuration(it.took), humanTokens(it.tokens))
+		it.findings, shortDuration(it.took), m.spendPair(it.inputTokens, it.outputTokens))
 }
 
 // itemNote is the right-hand column of a running row: which round, what the
@@ -462,13 +462,30 @@ func (m dashboardModel) itemNote(it *dashboardItem) string {
 	}
 	// Spend so far, kept last so the round and the current tool — the parts
 	// that change as the work proceeds — stay on the left where the eye lands.
-	if it.tokens > 0 {
+	if it.inputTokens > 0 || it.outputTokens > 0 {
 		if b.Len() > 0 {
 			b.WriteString(m.paint(tuiDimStyle, " · "))
 		}
-		b.WriteString(m.paint(tuiBusyStyle, "▲"+humanTokens(it.tokens)))
+		b.WriteString(m.spendPair(it.inputTokens, it.outputTokens))
 	}
 	return b.String()
+}
+
+// spendPair renders a spend as the header renders the run's: ▲ for input, ▼
+// for output. The same two arrows mean the same two things everywhere, so a
+// row's numbers can be read against the run's without a second guess.
+func (m dashboardModel) spendPair(input, output int64) string {
+	s := ""
+	if input > 0 {
+		s += m.paint(tuiBusyStyle, "▲"+humanTokens(input))
+	}
+	if output > 0 {
+		if s != "" {
+			s += " "
+		}
+		s += m.paint(tuiWarnStyle, "▼"+humanTokens(output))
+	}
+	return s
 }
 
 // viewLog is the scrolling activity feed. It is the only region with history,

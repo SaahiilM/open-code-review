@@ -87,9 +87,9 @@ func TestTokenBadgeHiddenUntilThereIsUsage(t *testing.T) {
 }
 
 func TestCostLineCarriesFindingsTimeAndSpend(t *testing.T) {
-	it := &dashboardItem{findings: 7, took: 5 * time.Minute, tokens: 214_000}
+	it := &dashboardItem{findings: 7, took: 5 * time.Minute, inputTokens: 200_000, outputTokens: 14_000}
 	got := stripDashboardANSI(newDashboardModel(progressOptions{}, 0).costLine(it))
-	for _, want := range []string{"7 findings", "5m00s", "214k"} {
+	for _, want := range []string{"7 findings", "5m00s", "▲200k", "▼14k"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("cost line %q is missing %q", got, want)
 		}
@@ -105,8 +105,13 @@ func TestRunningRowKeepsTokensBeforeAnyRoundOrTool(t *testing.T) {
 		progress.Event{Kind: progress.KindUsage, Group: "a.go", InputTokens: 1000, OutputTokens: 1000},
 	)
 	note := stripDashboardANSI(m.itemNote(m.lookup("a.go")))
-	if !strings.Contains(note, "▲2k") {
-		t.Errorf("a starting row must still show its spend, got %q", note)
+	// The arrows mean what the header's arrows mean: ▲ is input, ▼ is
+	// output. A row that carried their sum under ▲ read as more than the
+	// whole run had spent.
+	for _, want := range []string{"▲1k", "▼1k"} {
+		if !strings.Contains(note, want) {
+			t.Errorf("a starting row must still show its spend, got %q", note)
+		}
 	}
 }
 
@@ -280,5 +285,27 @@ func TestSkipsPrintOnceAndCollapse(t *testing.T) {
 	}
 	if !strings.Contains(got, "Skipping 270 file(s) — filtered by path/extension rules") {
 		t.Errorf("collapsed row is wrong:\n%s", got)
+	}
+}
+
+// The arrows mean the same thing in the header and in a row: ▲ is input, ▼
+// is output. A row that carried their sum under the input arrow read as more
+// than the run had spent, which is what made the two look out of sync.
+func TestRowAndHeaderMeanTheSameThingByTheirArrows(t *testing.T) {
+	m := testModel(100, 30)
+	m = feed(m,
+		progress.Event{Kind: progress.KindGroupStart, Group: "a.go", Paths: []string{"a.go"}},
+		progress.Event{Kind: progress.KindUsage, Group: "a.go", InputTokens: 40_000, OutputTokens: 4_000},
+	)
+	m.inputTokens = 40_000
+	m.outputTokens = 4_000
+
+	row := stripDashboardANSI(m.itemNote(m.lookup("a.go")))
+	badge := stripDashboardANSI(m.tokenBadge())
+	if !strings.Contains(row, "▲40k") || !strings.Contains(row, "▼4k") {
+		t.Errorf("the row must mark input and output apart, got %q", row)
+	}
+	if !strings.Contains(badge, "▲40k") || !strings.Contains(badge, "▼4k") {
+		t.Errorf("the header must mark input and output apart, got %q", badge)
 	}
 }

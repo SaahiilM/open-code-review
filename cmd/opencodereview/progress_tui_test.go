@@ -328,8 +328,12 @@ func TestTokenColumnsAppear(t *testing.T) {
 		t.Errorf("the header must distinguish input from output with arrows, got %q", head)
 	}
 	row := stripDashboardANSI(m.viewWork())
-	if !strings.Contains(row, "▲5k") {
-		t.Errorf("a running row must show what it has spent, got %q", row)
+	// The row marks its input and output the way the header does, so the two
+	// can be read against each other.
+	for _, want := range []string{"▲3.8k", "▼1.2k"} {
+		if !strings.Contains(row, want) {
+			t.Errorf("a running row must show what it has spent, got %q", row)
+		}
 	}
 }
 
