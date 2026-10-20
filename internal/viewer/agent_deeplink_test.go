@@ -110,6 +110,56 @@ func TestAgentScript_TruncatesOnTheEncodedLength(t *testing.T) {
 
 // The finding's text is read from the rendered card instead of being shipped
 // again in a data attribute, which roughly doubled the size of a session page.
+// The toggle's click used to stop propagating, which kept the page-level
+// dismiss handler from seeing it: opening a second menu then left the first
+// one open, so two dropdowns were on screen at once.
+func TestAgentScript_ToggleDoesNotStopPropagation(t *testing.T) {
+	src, err := assets.ReadFile("static/agent.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(src)
+	if strings.Contains(js, ".stopPropagation(") {
+		t.Error("agent.js stops the toggle's click from propagating, so the dismiss handler never sees it")
+	}
+}
+
+// The workspace parameter is a file URI, and building it by concatenating
+// "file://" with the path does not produce a valid URI for a Windows path
+// (backslashes, no third slash) nor for a path containing "#" or "?", which
+// would start a fragment or a query.
+func TestAgentScript_BuildsTheWorkspaceURIWithTheURLParser(t *testing.T) {
+	src, err := assets.ReadFile("static/agent.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(src)
+	if strings.Contains(js, `"file://" + dir`) {
+		t.Error("agent.js builds the workspace URI by concatenation, which is not a valid URI for every path")
+	}
+	if !strings.Contains(js, "new URL(") {
+		t.Error("agent.js does not build the workspace URI with the URL parser")
+	}
+}
+
+// Two copies of the dismissal can drift apart, and they already had: one
+// closed the menu the page-level handler was looking at, the other the menu
+// whose button was pressed.
+func TestAgentScript_HasOneDismissal(t *testing.T) {
+	src, err := assets.ReadFile("static/agent.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(src)
+	if !strings.Contains(js, "closeMenu(root)") {
+		t.Error("agent.js does not route the per-finding dismissal through closeMenu")
+	}
+	if strings.Contains(js, `menu.hidden = true;
+            toggle.setAttribute("aria-expanded", "false");`) {
+		t.Error("agent.js has a second copy of the dismissal logic")
+	}
+}
+
 func TestSessionPage_DoesNotDuplicateTheFindingText(t *testing.T) {
 	body := renderSessionPage(t,
 		`{"type":"session_start","timestamp":"2025-06-01T10:00:00Z","cwd":"/my/proj"}`,

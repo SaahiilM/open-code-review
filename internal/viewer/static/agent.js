@@ -143,6 +143,15 @@
         return repo.startsWith("/") || /^[A-Za-z]:[\\/]/.test(repo) ? repo : "";
     }
 
+    // A file URI for a workspace directory. The URL parser does the work the
+    // string concatenation cannot: a Windows path has its backslashes turned
+    // into slashes and gains the leading slash a URI needs, and a "#" or "?"
+    // in the path is escaped instead of starting a fragment or a query.
+    function fileURI(dir) {
+        const url = new URL("file:///" + dir.replace(/\\/g, "/"));
+        return url.href;
+    }
+
     // Each entry returns a URL. Grouped by vendor and ordered app -> CLI ->
     // extension, which is the order a user reaches for: the app is already
     // running, the CLI is the fallback, the editor extension is last.
@@ -185,7 +194,7 @@
             const p = new URLSearchParams({ prompt });
             const dir = repoPath(ctx);
             // workspace takes a folder URI, not a bare path.
-            if (dir) p.set("workspace", "file://" + dir);
+            if (dir) p.set("workspace", fileURI(dir));
             return "vscode://agents/new?" + p.toString();
         },
     };
@@ -290,18 +299,18 @@
             });
         };
 
-        const close = () => {
-            menu.hidden = true;
-            toggle.setAttribute("aria-expanded", "false");
-        };
+        const close = () => closeMenu(root);
         const open = () => {
             buildLinks();
             menu.hidden = false;
             toggle.setAttribute("aria-expanded", "true");
         };
 
-        toggle.addEventListener("click", (e) => {
-            e.stopPropagation();
+        // No stopPropagation: the page-level dismiss handler has to see this
+        // click, or opening a second menu would leave the first one open.
+        // It skips clicks that land inside this root, so it does not close
+        // the menu being toggled.
+        toggle.addEventListener("click", () => {
             menu.hidden ? open() : close();
         });
 
@@ -363,6 +372,8 @@
         });
     }
 
+    // closeMenu is the one implementation of the dismissal, used by the
+    // per-finding handlers and by the page-level dismiss handler alike.
     function closeMenu(root) {
         const menu = root.querySelector(".agent-menu");
         const toggle = root.querySelector("[data-agent-menu-toggle]");
