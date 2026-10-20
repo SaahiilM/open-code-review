@@ -759,7 +759,7 @@ func (r *Runner) executeToolCall(ctx context.Context, taskKey string, call llm.T
 	if err != nil {
 		errMsg := fmt.Sprintf("Error parsing tool arguments for %s: %v", toolName, err)
 		telemetry.PrintToolCallStarted(toolName, nil)
-		telemetry.PrintToolCallError(toolName, fmt.Errorf("%s", errMsg))
+		telemetry.PrintToolCallError(taskKey, toolName, fmt.Errorf("%s", errMsg))
 		r.recordToolFailure(toolCallNumber, toolName, taskKey, errMsg,
 			rec, call.Function.Arguments, time.Since(callStarted))
 		return r.toolFailureResult(taskKey, toolName, errMsg)
@@ -787,7 +787,7 @@ func (r *Runner) executeToolCall(ctx context.Context, taskKey string, call llm.T
 			telemetry.RecordToolCall(ctx, t.Name(), dur, false)
 			r.recordToolFailure(toolCallNumber, toolName, taskKey, errMsg,
 				rec, call.Function.Arguments, dur)
-			telemetry.PrintToolCallError(t.Name(), toolErr)
+			telemetry.PrintToolCallError(taskKey, t.Name(), toolErr)
 			return r.toolFailureResult(taskKey, toolName, errMsg)
 		}
 
@@ -875,6 +875,7 @@ func (r *Runner) executeToolCall(ctx context.Context, taskKey string, call llm.T
 					telemetry.RecordToolResult(toolSpan, toolName, dur.Milliseconds(), nil)
 					toolSpan.End()
 					telemetry.PrintToolCallFinished(toolName, dur)
+					progress.Publish(progress.Event{Kind: progress.KindToolDone, Group: taskKey})
 				}()
 				resolveAndCollect(asyncCtx)
 				return []model.LlmComment{}, nil
@@ -911,10 +912,11 @@ func (r *Runner) executeToolCall(ctx context.Context, taskKey string, call llm.T
 	if err != nil {
 		r.recordToolFailure(toolCallNumber, toolName, taskKey, err.Error(),
 			rec, call.Function.Arguments, dur)
-		telemetry.PrintToolCallError(toolName, err)
+		telemetry.PrintToolCallError(taskKey, toolName, err)
 		return r.toolFailureResult(taskKey, toolName, fmt.Sprintf("Error executing tool %s: %v", toolName, err))
 	}
 	telemetry.PrintToolCallFinished(toolName, dur)
+	progress.Publish(progress.Event{Kind: progress.KindToolDone, Group: taskKey})
 	if rec != nil {
 		rec.AddToolResult(toolName, call.Function.Arguments, result)
 	}

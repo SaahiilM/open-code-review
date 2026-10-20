@@ -225,7 +225,7 @@ func TestPrintToolCallFinished(t *testing.T) {
 
 func TestPrintToolCallError(t *testing.T) {
 	out := captureStderr(t, func() {
-		PrintToolCallError("file_read", fmt.Errorf("permission denied"))
+		PrintToolCallError("task-1", "file_read", fmt.Errorf("permission denied"))
 	})
 	if !strings.Contains(out, "✘ file_read") {
 		t.Errorf("expected tool name with X mark, got %q", out)
@@ -289,13 +289,16 @@ func TestPrintToolCallErrorPublishesAToolError(t *testing.T) {
 	})
 	defer restore()
 
-	PrintToolCallError("file_read", fmt.Errorf("permission denied"))
+	PrintToolCallError("task-1", "file_read", fmt.Errorf("permission denied"))
 
 	if len(got) != 1 {
 		t.Fatalf("expected 1 event, got %d", len(got))
 	}
 	if got[0].Kind != progress.KindToolError {
 		t.Errorf("kind = %v, want KindToolError", got[0].Kind)
+	}
+	if got[0].Group != "task-1" {
+		t.Errorf("group = %q, want the task the tool ran under", got[0].Group)
 	}
 	if !got[0].Stderr {
 		t.Error("the tool error must stay on stderr")

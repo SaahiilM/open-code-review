@@ -121,13 +121,17 @@ func PrintToolCallFinished(toolName string, dur time.Duration) {
 
 // PrintToolCallError prints a line when a tool fails.
 // Example: [ocr]   ✘ file_read "internal/config/rules/loader.go" failed: permission denied
-func PrintToolCallError(toolName string, err error) {
+//
+// group is the task the tool ran under, so a live dashboard can attribute the
+// failure to the row that was running it.
+func PrintToolCallError(group, toolName string, err error) {
 	// Published, not written through the diag writer: Stderr keeps the line on
 	// stderr while the text sink is installed, which is the same bytes this
 	// has always produced, and under the dashboard it becomes a tool-error row
 	// rather than a generic warning.
 	progress.Publish(progress.Event{
 		Kind:   progress.KindToolError,
+		Group:  group,
 		Text:   fmt.Sprintf("  ✘ %s failed: %v\n", toolName, err),
 		Stderr: true,
 	})

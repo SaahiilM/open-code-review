@@ -882,3 +882,33 @@ func TestClipMarksTruncation(t *testing.T) {
 		t.Errorf("a truncated row must show an ellipsis, got %q", got)
 	}
 }
+
+// A row names the tool it is calling right now. When the call ends the name
+// has to go: leaving it there reads as though the row were still running that
+// tool, which is exactly what it is not doing.
+func TestRowClearsTheToolWhenTheCallEnds(t *testing.T) {
+	m := testModel(100, 30)
+	m = feed(m, progress.Event{Kind: progress.KindGroupStart, Group: "a.go", Paths: []string{"a.go"}})
+	m = feed(m, progress.Event{Kind: progress.KindToolStart, Group: "a.go", Detail: "file_read"})
+
+	if note := stripDashboardANSI(m.itemNote(m.lookup("a.go"))); !strings.Contains(note, "file_read") {
+		t.Fatalf("the row must name the tool it is calling, got %q", note)
+	}
+
+	m = feed(m, progress.Event{Kind: progress.KindToolDone, Group: "a.go"})
+	if note := stripDashboardANSI(m.itemNote(m.lookup("a.go"))); strings.Contains(note, "file_read") {
+		t.Errorf("a finished call must not still be named, got %q", note)
+	}
+}
+
+// A tool that failed is not running either, so the row drops its name.
+func TestRowClearsTheToolWhenTheCallFails(t *testing.T) {
+	m := testModel(100, 30)
+	m = feed(m, progress.Event{Kind: progress.KindGroupStart, Group: "a.go", Paths: []string{"a.go"}})
+	m = feed(m, progress.Event{Kind: progress.KindToolStart, Group: "a.go", Detail: "file_read"})
+	m = feed(m, progress.Event{Kind: progress.KindToolError, Group: "a.go", Err: "permission denied"})
+
+	if note := stripDashboardANSI(m.itemNote(m.lookup("a.go"))); strings.Contains(note, "file_read") {
+		t.Errorf("a failed call must not still be named, got %q", note)
+	}
+}

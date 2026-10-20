@@ -410,6 +410,21 @@ func (m *dashboardModel) apply(ev progress.Event) {
 			it.tool = ev.Detail
 		}
 
+	case progress.KindToolDone:
+		// The call is over, so the row is waiting on the model again.
+		// Leaving the name there would read as "it is calling this right
+		// now", which is exactly what it is not doing.
+		if it := m.lookup(ev.Group); it != nil {
+			it.tool = ""
+		}
+
+	case progress.KindToolError:
+		// A failed call is not running either, and the failure itself is
+		// already in the activity log.
+		if it := m.lookup(ev.Group); it != nil {
+			it.tool = ""
+		}
+
 	case progress.KindReused:
 		// Reused files count as covered but have no row: nothing is being
 		// done to them now, and listing hundreds of them would bury the work.
