@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 alibaba/open-code-review Contributors
 
-package progress
+package main
 
 import (
 	"fmt"
@@ -10,44 +10,46 @@ import (
 
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/alibaba/open-code-review/internal/progress"
 )
 
 const (
-	// logRetained is how many log entries the model keeps. The log is a
+	// dashboardLogRetained is how many log entries the dashboard keeps. The log is a
 	// diagnostic surface, not a transcript: a long run produces thousands of
 	// tool events, and holding them all would grow without bound for no gain.
-	logRetained = 500
+	dashboardLogRetained = 500
 
-	// tickInterval drives the spinner and the elapsed clock. It matches the
+	// dashboardTickInterval drives the spinner and the elapsed clock. It matches the
 	// refresh rate closely enough that the two never look out of step.
-	tickInterval = 100 * time.Millisecond
+	dashboardTickInterval = 100 * time.Millisecond
 )
 
-// itemState is where a unit of concurrent work has got to.
-type itemState int
+// dashboardItemState is where a unit of concurrent work has got to.
+type dashboardItemState int
 
 const (
-	stateRunning itemState = iota
-	stateDone
-	stateFailed
+	dashboardStateRunning dashboardItemState = iota
+	dashboardStateDone
+	dashboardStateFailed
 )
 
-// pane identifies which region the arrow keys act on.
-type pane int
+// dashboardPane identifies which region the arrow keys act on.
+type dashboardPane int
 
 const (
-	paneWork pane = iota
-	paneActivity
+	dashboardPaneWork dashboardPane = iota
+	dashboardPaneActivity
 )
 
-// item is one row of the work list. A run dispatches groups of semantically
+// dashboardItem is one row of the work list. A run dispatches groups of semantically
 // related files concurrently, so "which file is it on" is really "which
 // groups are in flight and what is each one doing" — one row per group answers
 // it, with the group's files behind it.
-type item struct {
+type dashboardItem struct {
 	label    string
 	paths    []string
-	state    itemState
+	state    dashboardItemState
 	round    int
 	tool     string
 	started  time.Time
@@ -61,7 +63,7 @@ type item struct {
 
 // display is the short form of the row's subject: the first file, which is what
 // a person scanning the list is looking for.
-func (it *item) display() string {
+func (it *dashboardItem) display() string {
 	if len(it.paths) == 0 {
 		return it.label
 	}
@@ -71,14 +73,14 @@ func (it *item) display() string {
 	return fmt.Sprintf("%s (+%d)", it.paths[0], len(it.paths)-1)
 }
 
-// logEntry is one line of the activity feed, stamped so a slow LLM round is
+// dashboardLogEntry is one line of the activity feed, stamped so a slow LLM round is
 // visibly slow rather than merely absent.
-type logEntry struct {
+type dashboardLogEntry struct {
 	// stamp is the pre-formatted clock reading. Formatting it once here keeps
 	// the render path from re-laying out the same timestamp on every frame.
 	stamp string
 	text  string
-	kind  Kind
+	kind  progress.Kind
 	// count is how many events this row stands for. It is 1 for an ordinary
 	// line and greater when a run of identically-reasoned skips has been
 	// collapsed into this row.
@@ -87,28 +89,28 @@ type logEntry struct {
 	reason string
 }
 
-// tickMsg drives the spinner and the clock.
-type tickMsg time.Time
+// dashboardTickMsg drives the spinner and the clock.
+type dashboardTickMsg time.Time
 
-// eventMsg carries a published Event into the Bubble Tea update loop. The
+// dashboardEventMsg carries a published progress.Event into the Bubble Tea update loop. The
 // pipeline's goroutines send these from outside; Program.Send is documented as
 // safe to call concurrently, which is what makes this the only locking-free
 // path from a worker goroutine to the view.
-type eventMsg struct{ Event }
+type dashboardEventMsg struct{ progress.Event }
 
-// model is the dashboard. It is a value type, as Bubble Tea requires; all
+// dashboardModel is the dashboard. It is a value type, as Bubble Tea requires; all
 // mutable state is either a pointer field or a slice the Update loop replaces.
-type model struct {
-	title    string
-	subtitle string
-	model    string
-	provider string
-	repo     string
+type dashboardModel struct {
+	title     string
+	subtitle  string
+	modelName string
+	provider  string
+	repo      string
 
-	items   []*item
-	byGroup map[string]*item
+	items   []*dashboardItem
+	byGroup map[string]*dashboardItem
 
-	log []logEntry
+	log []dashboardLogEntry
 	// logOffset is how far the visible window has been scrolled back from the
 	// tail. Zero means following.
 	logOffset int
@@ -145,7 +147,7 @@ type model struct {
 	// focus is which pane the arrow keys scroll. The work pane holds the
 	// concurrent rows, the activity pane the log; both can outgrow their
 	// region, so they cannot both be driven by one pair of keys.
-	focus   pane
+	focus   dashboardPane
 	workTop int
 	// showCompleted expands the finished rows. They are folded away by
 	// default because a long scan finishes hundreds of files and the finished
@@ -154,27 +156,35 @@ type model struct {
 
 	width  int
 	height int
+	// rawWidth and rawHeight are the size the terminal actually reported,
+	// before the layout floor was applied. The guard needs them: a terminal
+	// smaller than the floor cannot show the dashboard, and saying so beats
+	// drawing a frame that does not fit. A reported zero is not "too small"
+	// but "size not known yet", which a pty delivers before its first real
+	// resize, so it is left to the floor.
+	rawWidth  int
+	rawHeight int
 
 	spinner spinner.Model
 	// cancel abandons the run when the user presses ctrl+c.
 	cancel func()
 }
 
-// newModel seeds the dashboard. totalFiles is the frozen coverage denominator
+// newDashboardModel seeds the dashboard. totalFiles is the frozen coverage denominator
 // the run already computed, so the bar is meaningful from the first frame.
-func newModel(o Options, totalFiles int) model {
-	sp := spinner.New(spinner.WithSpinner(spinner.Dot), spinner.WithStyle(styleBusy))
-	return model{
+func newDashboardModel(o progressOptions, totalFiles int) dashboardModel {
+	sp := spinner.New(spinner.WithSpinner(spinner.Dot), spinner.WithStyle(tuiBusyStyle))
+	return dashboardModel{
 		color:      o.Color,
 		tokens:     o.Tokens,
 		session:    o.Session,
 		title:      o.Title,
 		subtitle:   o.Subtitle,
-		model:      o.Model,
+		modelName:  o.Model,
 		provider:   o.Provider,
 		repo:       o.Repo,
-		byGroup:    map[string]*item{},
-		focus:      paneWork,
+		byGroup:    map[string]*dashboardItem{},
+		focus:      dashboardPaneWork,
 		totalFiles: totalFiles,
 		startedAt:  time.Now(),
 		spinner:    sp,
@@ -185,16 +195,16 @@ func newModel(o Options, totalFiles int) model {
 }
 
 // Init starts the spinner and the clock.
-func (m model) Init() tea.Cmd {
+func (m dashboardModel) Init() tea.Cmd {
 	return tea.Batch(m.spinner.Tick, tick())
 }
 
 func tick() tea.Cmd {
-	return tea.Tick(tickInterval, func(t time.Time) tea.Msg { return tickMsg(t) })
+	return tea.Tick(dashboardTickInterval, func(t time.Time) tea.Msg { return dashboardTickMsg(t) })
 }
 
 // Update folds one message into the dashboard.
-func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		// Clamp to a usable minimum. A terminal can legitimately report 0
@@ -202,11 +212,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// resize that follows), and every region clips itself to the frame
 		// width — so a zero would blank the whole dashboard rather than
 		// merely look wrong.
+		m.rawWidth = msg.Width
+		m.rawHeight = msg.Height
 		m.width = max(msg.Width, minFrameWidth)
 		m.height = max(msg.Height, minFrameHeight)
 		return m, nil
 
-	case tickMsg:
+	case dashboardTickMsg:
 		if m.tokens != nil {
 			m.inputTokens, m.outputTokens = m.tokens()
 		}
@@ -220,7 +232,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spinner, cmd = m.spinner.Update(msg)
 		return m, cmd
 
-	case eventMsg:
+	case dashboardEventMsg:
 		m.apply(msg.Event)
 		return m, nil
 
@@ -230,7 +242,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+func (m dashboardModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "esc":
 		// Detach, do not cancel. The run is already in flight on other
@@ -291,14 +303,14 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func oppositePane(p pane) pane {
-	if p == paneWork {
-		return paneActivity
+func oppositePane(p dashboardPane) dashboardPane {
+	if p == dashboardPaneWork {
+		return dashboardPaneActivity
 	}
-	return paneWork
+	return dashboardPaneWork
 }
 
-// scrollPane moves the focused pane one step. delta is +1 for "further
+// scrollPane moves the focused dashboardPane one step. delta is +1 for "further
 // forward" (down the list) and -1 for "back" (up it).
 //
 // The two panes count in opposite directions, which is why the sign is
@@ -306,8 +318,8 @@ func oppositePane(p pane) pane {
 // while the log's offset is measured backwards from the tail, so moving down
 // towards the newest line shrinks it. Normalising here keeps every caller
 // thinking in one direction.
-func (m *model) scrollPane(delta int) {
-	if m.focus == paneActivity {
+func (m *dashboardModel) scrollPane(delta int) {
+	if m.focus == dashboardPaneActivity {
 		m.scroll(-delta)
 		return
 	}
@@ -323,7 +335,7 @@ func (m *model) scrollPane(delta int) {
 // scroll moves the activity window. delta is positive for older entries.
 // Reaching the tail clears the hold, so a reader who scrolls to the bottom
 // starts following again without a second keypress.
-func (m *model) scroll(delta int) {
+func (m *dashboardModel) scroll(delta int) {
 	m.logOffset += delta
 	if m.logOffset <= 0 {
 		m.logOffset = 0
@@ -332,46 +344,73 @@ func (m *model) scroll(delta int) {
 
 // holding reports whether the reader has scrolled the activity log away from
 // the tail.
-func (m model) holding() bool { return m.logOffset > 0 }
+func (m dashboardModel) holding() bool { return m.logOffset > 0 }
+
+// sanitizeProgressEvent strips control characters from the parts of an event
+// that came from outside the program.
+//
+// A file name, a branch, or an error message can carry an escape sequence or
+// a carriage return. Painting it as-is would let a crafted name repaint a
+// region of the dashboard or hide the text around it. Sanitizing here, where
+// the event enters the model, means every render site can trust what it
+// draws.
+func sanitizeProgressEvent(ev progress.Event) progress.Event {
+	ev.Text = sanitizeTerminal(ev.Text)
+	ev.Detail = sanitizeTerminal(ev.Detail)
+	ev.Err = sanitizeTerminal(ev.Err)
+	ev.SkipReason = sanitizeTerminal(ev.SkipReason)
+	ev.Group = sanitizeTerminal(ev.Group)
+	if len(ev.Paths) > 0 {
+		// Copy rather than edit in place: the slice belongs to the publisher,
+		// and the same event may be applied to more than one model.
+		paths := make([]string, len(ev.Paths))
+		for i, p := range ev.Paths {
+			paths[i] = sanitizeTerminal(p)
+		}
+		ev.Paths = paths
+	}
+	return ev
+}
 
 // apply folds one event into the dashboard state. It is the only writer, so
 // the counters and the row list can never disagree.
-func (m *model) apply(ev Event) {
+func (m *dashboardModel) apply(ev progress.Event) {
+	ev = sanitizeProgressEvent(ev)
 	switch ev.Kind {
-	case KindGroupStart:
+	case progress.KindGroupStart:
 		if m.startItem(ev) {
 			m.running++
 		}
 
-	case KindRoundStart:
+	case progress.KindRoundStart:
 		if it := m.lookup(ev.Group); it != nil {
 			it.round = ev.Round
 		}
 
-	case KindGroupDone:
-		m.doneFiles += m.finish(ev, stateDone)
+	case progress.KindGroupDone:
+		m.doneFiles += m.finish(ev, dashboardStateDone)
 		m.findings += ev.Findings
 
-	case KindGroupFailed:
-		m.failedFiles += m.finish(ev, stateFailed)
+	case progress.KindGroupFailed:
+		m.failedFiles += m.finish(ev, dashboardStateFailed)
 
-	case KindSkipped:
+	case progress.KindSkipped:
 		m.skippedFiles++
 		m.appendSkip(ev)
 		return
 
-	case KindBudgetReached:
+	case progress.KindBudgetReached:
 		m.budgetHit = true
 
-	case KindPlanned:
+	case progress.KindPlanned:
 		m.totalFiles = ev.Files
 
-	case KindToolStart:
+	case progress.KindToolStart:
 		if it := m.lookup(ev.Group); it != nil {
 			it.tool = ev.Detail
 		}
 
-	case KindReused:
+	case progress.KindReused:
 		// Reused files count as covered but have no row: nothing is being
 		// done to them now, and listing hundreds of them would bury the work.
 		// Their findings still count — they are real findings this run is
@@ -379,7 +418,7 @@ func (m *model) apply(ev Event) {
 		m.reusedFiles += ev.Files
 		m.findings += ev.Findings
 
-	case KindUsage:
+	case progress.KindUsage:
 		// Cumulative totals from the pipeline, not deltas: the row shows what
 		// the group has spent in total, which is also what the header sums.
 		if it := m.lookup(ev.Group); it != nil {
@@ -405,9 +444,9 @@ func (m *model) apply(ev Event) {
 		// climbing, and releasing the pause brings it into view.
 		m.pending++
 	}
-	m.log = append(m.log, logEntry{stamp: ev.Time.Format("15:04:05"), text: text, kind: ev.Kind})
-	if len(m.log) > logRetained {
-		m.log = m.log[len(m.log)-logRetained:]
+	m.log = append(m.log, dashboardLogEntry{stamp: ev.Time.Format("15:04:05"), text: text, kind: ev.Kind})
+	if len(m.log) > dashboardLogRetained {
+		m.log = m.log[len(m.log)-dashboardLogRetained:]
 	}
 }
 
@@ -423,20 +462,20 @@ func (m *model) apply(ev Event) {
 // that explain what the run was about to do. The collapse is TUI-only — the
 // per-file lines are still printed for piped and CI output, where they are the
 // record of what was left out.
-func (m *model) appendSkip(ev Event) {
+func (m *dashboardModel) appendSkip(ev progress.Event) {
 	reason := ev.SkipReason
 	if n := len(m.log); n > 0 {
 		last := &m.log[n-1]
-		if last.kind == KindSkipped && last.reason == reason {
+		if last.kind == progress.KindSkipped && last.reason == reason {
 			last.count++
 			last.text = fmt.Sprintf("Skipping %d file(s) — %s", last.count, reason)
 			return
 		}
 	}
-	m.log = append(m.log, logEntry{
+	m.log = append(m.log, dashboardLogEntry{
 		stamp:  ev.Time.Format("15:04:05"),
 		text:   fmt.Sprintf("Skipping %s — %s", ev.Detail, reason),
-		kind:   KindSkipped,
+		kind:   progress.KindSkipped,
 		count:  1,
 		reason: reason,
 	})
@@ -445,20 +484,20 @@ func (m *model) appendSkip(ev Event) {
 // finish closes out a work row and returns how many files it accounts for.
 // Done and failed differ only in the state and the one extra field, so they
 // share this rather than repeating the same ten lines twice.
-func (m *model) finish(ev Event, state itemState) int {
+func (m *dashboardModel) finish(ev progress.Event, state dashboardItemState) int {
 	it := m.lookup(ev.Group)
 	if it == nil {
 		// The row is missing (a resumed run, a late event). The files still
 		// have to be counted, or the bar would stall short of full.
 		return max(ev.Files, 1)
 	}
-	if it.state == stateRunning {
+	if it.state == dashboardStateRunning {
 		m.running--
 	}
 	it.state = state
 	it.tool = ""
 	it.took = time.Since(it.started)
-	if state == stateDone {
+	if state == dashboardStateDone {
 		it.findings = ev.Findings
 	} else {
 		it.err = ev.Err
@@ -469,18 +508,18 @@ func (m *model) finish(ev Event, state itemState) int {
 // startItem creates or refreshes a work row, reporting whether it is new.
 // A repeat announcement is a resumed group being re-announced: it must refresh
 // the row's clock, not stack a duplicate or count as extra concurrent work.
-func (m *model) startItem(ev Event) bool {
+func (m *dashboardModel) startItem(ev progress.Event) bool {
 	if it, ok := m.byGroup[ev.Group]; ok {
 		it.started = time.Now()
 		return false
 	}
-	it := &item{label: ev.Group, paths: ev.Paths, state: stateRunning, started: time.Now()}
+	it := &dashboardItem{label: ev.Group, paths: ev.Paths, state: dashboardStateRunning, started: time.Now()}
 	m.byGroup[ev.Group] = it
 	m.items = append(m.items, it)
 	return true
 }
 
-func (m *model) lookup(group string) *item {
+func (m *dashboardModel) lookup(group string) *dashboardItem {
 	if group == "" {
 		return nil
 	}
@@ -491,7 +530,7 @@ func (m *model) lookup(group string) *item {
 // event's own count, falls back to the group's recorded paths, and never
 // reports zero: a dispatched group always covers at least one file, and
 // undercounting would stall the bar short of 100% on a run that finished.
-func (m *model) fileCount(ev Event, it *item) int {
+func (m *dashboardModel) fileCount(ev progress.Event, it *dashboardItem) int {
 	if ev.Files > 0 {
 		return ev.Files
 	}
@@ -503,7 +542,7 @@ func (m *model) fileCount(ev Event, it *item) int {
 
 // fraction is the bar's progress, over the files selected for review. See
 // finishedFiles for why skipped files are not in the numerator.
-func (m model) fraction() float64 {
+func (m dashboardModel) fraction() float64 {
 	if m.totalFiles <= 0 {
 		return 0
 	}

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 alibaba/open-code-review Contributors
 
-package progress
+package main
 
 import (
 	"fmt"
@@ -10,6 +10,9 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
+
+	"github.com/alibaba/open-code-review/internal/progress"
 )
 
 // The dashboard is five stacked regions:
@@ -41,47 +44,46 @@ const (
 
 	// minFrameWidth and minFrameHeight are the floor for the reported window.
 	// Every region clips itself to the frame width, so a zero would blank the
-	// dashboard instead of just looking cramped.
+	// dashboard instead of just looking cramped. A terminal below the floor
+	// gets the too-small message rather than a frame that does not fit.
 	minFrameWidth  = 40
 	minFrameHeight = 12
+
+	// tooSmallMessage is what a terminal too small for the dashboard is told
+	// instead of being shown a frame that would not fit.
+	tooSmallMessage = "Terminal too small for the dashboard — enlarge it to at least 40x12, or press Ctrl+C to stop."
 )
 
-// The palette. It uses the same ANSI-256 indexes as provider_tui.go, which
-// styles the config wizards: the two cannot share one declaration (that file
-// is package main), but matching them is what makes ocr look like one program
-// rather than two.
+// The dashboard shares the palette provider_tui.go declares for the config
+// wizards, so the two terminal interfaces look like one program rather than
+// two. The styles the provider flow does not have are declared here, in the
+// same tui*Style shape.
 var (
-	styleTitle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
-	styleDim     = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	styleValue   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
-	styleOK      = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
-	styleWarn    = lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
-	styleErr     = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
-	styleBusy    = lipgloss.NewStyle().Foreground(lipgloss.Color("12"))
-	styleSection = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("8"))
-	// The bar's segment colours. Reused is blue because it is inherited
+	tuiOKStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
+	tuiWarnStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
+	tuiBusyStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("12"))
+	tuiSectionStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("8"))
+	// The bar's segment colours. Reused is dim because it is inherited
 	// rather than earned by this run; done is green; failures are red, so
 	// they are visible in the bar itself and not only in the status row.
-	styleReused = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	styleDone   = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
+	tuiReusedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	tuiDoneStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
 )
 
-// plain is the --color=never path. The dashboard still runs when color is off,
-// because a live view is useful without color; it just stops painting on its
-// own initiative, the way the user asked it not to.
-var plain = lipgloss.NewStyle()
-
 // paint renders s with style, or plainly when color is off.
-func (m model) paint(style lipgloss.Style, s string) string {
+func (m dashboardModel) paint(style lipgloss.Style, s string) string {
 	if !m.color {
-		return plain.Render(s)
+		return tuiItemStyle.Render(s)
 	}
 	return style.Render(s)
 }
 
 // View draws the whole dashboard. The frame is composed with lipgloss joins
 // rather than a viewport so the top regions stay pinned while the log scrolls.
-func (m model) View() tea.View {
+func (m dashboardModel) View() tea.View {
+	if m.tooSmall() {
+		return tea.NewView(m.paint(tuiDimStyle, tooSmallMessage))
+	}
 	if m.detached {
 		// Update already quits on detach, so a frame rendered on the way out
 		// must not paint over the text the runner has just restored.
@@ -104,41 +106,51 @@ func (m model) View() tea.View {
 	return v
 }
 
-func (m model) viewHeader() string {
-	left := m.paint(styleTitle, "ocr "+m.title)
+// tooSmall reports whether the terminal is too narrow or too short for the
+// dashboard to draw itself.
+//
+// A reported zero is the pty that has not been sized yet, not a terminal
+// that cannot be shown, so it does not count.
+func (m dashboardModel) tooSmall() bool {
+	return (m.rawWidth > 0 && m.rawWidth < minFrameWidth) ||
+		(m.rawHeight > 0 && m.rawHeight < minFrameHeight)
+}
+
+func (m dashboardModel) viewHeader() string {
+	left := m.paint(tuiTitleStyle, "ocr "+m.title)
 	if m.repo != "" {
-		left += "  " + m.paint(styleDim, shortenPath(m.repo, m.width/3))
+		left += "  " + m.paint(tuiDimStyle, shortenPath(m.repo, m.width/3))
 	}
 	if m.subtitle != "" {
-		left += "  " + m.paint(styleDim, m.subtitle)
+		left += "  " + m.paint(tuiDimStyle, m.subtitle)
 	}
-	right := m.paint(styleDim, elapsed(time.Since(m.startedAt)))
-	ident := identity(m.provider, m.model)
+	right := m.paint(tuiDimStyle, elapsed(time.Since(m.startedAt)))
+	ident := identity(m.provider, m.modelName)
 	if ident == "" {
 		return joinEnds(m.width, left, right)
 	}
-	return joinEnds(m.width, left, m.paint(styleValue, ident)+m.tokenBadge()+"  "+right)
+	return joinEnds(m.width, left, m.paint(tuiTitleStyle, ident)+m.tokenBadge()+"  "+right)
 }
 
 // tokenBadge is the run's cumulative spend, beside the model name: arrows
 // rather than words, because the two numbers are read constantly and the
 // labels cost more width than they are worth.
-func (m model) tokenBadge() string {
+func (m dashboardModel) tokenBadge() string {
 	if m.inputTokens == 0 && m.outputTokens == 0 {
 		return ""
 	}
-	in := m.paint(styleBusy, "▲"+humanTokens(m.inputTokens))
-	out := m.paint(styleWarn, "▼"+humanTokens(m.outputTokens))
-	return m.paint(styleDim, " [") + in + m.paint(styleDim, " ") + out + m.paint(styleDim, "]")
+	in := m.paint(tuiBusyStyle, "▲"+humanTokens(m.inputTokens))
+	out := m.paint(tuiWarnStyle, "▼"+humanTokens(m.outputTokens))
+	return m.paint(tuiDimStyle, " [") + in + m.paint(tuiDimStyle, " ") + out + m.paint(tuiDimStyle, "]")
 }
 
-func (m model) viewBar() string {
+func (m dashboardModel) viewBar() string {
 	row := lipgloss.JoinHorizontal(lipgloss.Top,
-		m.paint(styleDim, "reviewing"),
+		m.paint(tuiDimStyle, "reviewing"),
 		" ",
 		m.viewBarFill(),
 		" ",
-		m.paint(styleValue, fmt.Sprintf("%d/%d", m.finishedFiles(), m.totalFiles)),
+		m.paint(tuiTitleStyle, fmt.Sprintf("%d/%d", m.finishedFiles(), m.totalFiles)),
 		" ",
 		m.viewBarLegend(),
 	)
@@ -152,7 +164,7 @@ func (m model) viewBar() string {
 // LLM-round granularity, so a spring would spend frames animating between
 // values a user reads as the same number, and it would pull in a physics
 // dependency for the privilege.
-func (m model) viewBarFill() string {
+func (m dashboardModel) viewBarFill() string {
 	cells := m.barCells()
 	body := ""
 	if m.totalFiles > 0 {
@@ -177,32 +189,32 @@ func (m model) viewBarFill() string {
 		done := part(m.doneFiles)
 		failed := part(m.failedFiles)
 
-		body = m.paint(styleReused, strings.Repeat("█", reused)) +
-			m.paint(styleDone, strings.Repeat("█", done)) +
-			m.paint(styleErr, strings.Repeat("█", failed))
+		body = m.paint(tuiReusedStyle, strings.Repeat("█", reused)) +
+			m.paint(tuiDoneStyle, strings.Repeat("█", done)) +
+			m.paint(tuiErrorStyle, strings.Repeat("█", failed))
 		if used := reused + done + failed; used < cells {
-			body += m.paint(styleDim, strings.Repeat("░", cells-used))
+			body += m.paint(tuiDimStyle, strings.Repeat("░", cells-used))
 		}
 	} else {
-		body = m.paint(styleDim, strings.Repeat("░", cells))
+		body = m.paint(tuiDimStyle, strings.Repeat("░", cells))
 	}
-	return m.paint(styleDim, "▕") + body + m.paint(styleDim, "▏")
+	return m.paint(tuiDimStyle, "▕") + body + m.paint(tuiDimStyle, "▏")
 }
 
 // viewBarLegend names the bar's segments. A bar in three colours is not
 // self-explanatory, and the reused segment in particular would otherwise be
 // guesswork: only the count beside it says what the first block means.
-func (m model) viewBarLegend() string {
+func (m dashboardModel) viewBarLegend() string {
 	seg := func(style lipgloss.Style, label string, n int) string {
 		if n == 0 {
 			return ""
 		}
-		return m.paint(style, "▇") + m.paint(styleDim, " "+label)
+		return m.paint(style, "▇") + m.paint(tuiDimStyle, " "+label)
 	}
 	parts := []string{
-		seg(styleReused, "reused", m.reusedFiles),
-		seg(styleDone, "done", m.doneFiles),
-		seg(styleErr, "failed", m.failedFiles),
+		seg(tuiReusedStyle, "reused", m.reusedFiles),
+		seg(tuiDoneStyle, "done", m.doneFiles),
+		seg(tuiErrorStyle, "failed", m.failedFiles),
 	}
 	out := ""
 	for i, p := range parts {
@@ -210,7 +222,7 @@ func (m model) viewBarLegend() string {
 			continue
 		}
 		if out != "" {
-			out += m.paint(styleDim, " ")
+			out += m.paint(tuiDimStyle, " ")
 		}
 		out += p
 		_ = i
@@ -222,7 +234,7 @@ func (m model) viewBarLegend() string {
 // than fixed, because a fixed bar overflows a narrow window and pushes every
 // region below it off screen. The overhead is "reviewing ", the two frame
 // glyphs, and the "n/m" counter.
-func (m model) barCells() int {
+func (m dashboardModel) barCells() int {
 	const overhead = len("reviewing  ▕▏ ") + 7
 	cells := m.width - overhead
 	switch {
@@ -237,28 +249,28 @@ func (m model) barCells() int {
 
 // viewStats is the counter row: everything a person would otherwise have to
 // grep the text wall for, in one line.
-func (m model) viewStats() string {
+func (m dashboardModel) viewStats() string {
 	parts := []string{
-		m.paint(styleOK, fmt.Sprintf("%d findings", m.findings)),
-		m.paint(styleDim, "·"),
-		m.paint(styleBusy, fmt.Sprintf("%d in flight", m.countRunning())),
+		m.paint(tuiOKStyle, fmt.Sprintf("%d findings", m.findings)),
+		m.paint(tuiDimStyle, "·"),
+		m.paint(tuiBusyStyle, fmt.Sprintf("%d in flight", m.countRunning())),
 	}
 	if m.reusedFiles > 0 {
-		parts = append(parts, m.paint(styleDim, "·"), m.paint(styleReused, fmt.Sprintf("%d reused", m.reusedFiles)))
+		parts = append(parts, m.paint(tuiDimStyle, "·"), m.paint(tuiReusedStyle, fmt.Sprintf("%d reused", m.reusedFiles)))
 	}
 	if m.failedFiles > 0 {
-		parts = append(parts, m.paint(styleDim, "·"), m.paint(styleErr, fmt.Sprintf("%d failed", m.failedFiles)))
+		parts = append(parts, m.paint(tuiDimStyle, "·"), m.paint(tuiErrorStyle, fmt.Sprintf("%d failed", m.failedFiles)))
 	}
 	if m.skippedFiles > 0 {
-		parts = append(parts, m.paint(styleDim, "·"), m.paint(styleWarn, fmt.Sprintf("%d skipped", m.skippedFiles)))
+		parts = append(parts, m.paint(tuiDimStyle, "·"), m.paint(tuiWarnStyle, fmt.Sprintf("%d skipped", m.skippedFiles)))
 	}
 	// The one thing that must never be buried: a run that is about to stop
 	// early has to say so in the status line, not only in the log.
 	if m.budgetHit {
-		parts = append(parts, m.paint(styleDim, "·"), m.paint(styleWarn, "token budget reached — stopping early"))
+		parts = append(parts, m.paint(tuiDimStyle, "·"), m.paint(tuiWarnStyle, "token budget reached — stopping early"))
 	}
 	if m.paused {
-		parts = append(parts, m.paint(styleDim, "·"), m.paint(styleWarn, "log paused"))
+		parts = append(parts, m.paint(tuiDimStyle, "·"), m.paint(tuiWarnStyle, "log paused"))
 	}
 	row := lipgloss.JoinHorizontal(lipgloss.Top, parts...)
 
@@ -273,7 +285,7 @@ func (m model) viewStats() string {
 			if len(id) > budget {
 				id = "…" + id[len(id)-budget+1:]
 			}
-			row += m.paint(styleDim, "· session ") + m.paint(styleDim, id)
+			row += m.paint(tuiDimStyle, "· session ") + m.paint(tuiDimStyle, id)
 		}
 	}
 	return clip(row, m.width)
@@ -282,7 +294,7 @@ func (m model) viewStats() string {
 // viewWork renders the concurrent work list. Running rows sort first because
 // they are the answer to "what is it doing right now"; finished rows sink
 // below them, most recent first.
-func (m model) viewWork() string {
+func (m dashboardModel) viewWork() string {
 	running, done := m.splitItems()
 	rows := make([]string, 0, len(running)+len(done)+2)
 
@@ -291,7 +303,7 @@ func (m model) viewWork() string {
 		rows = append(rows, m.viewItem(it, frame))
 	}
 	if len(running) == 0 {
-		rows = append(rows, m.paint(styleDim, "  waiting for work…"))
+		rows = append(rows, m.paint(tuiDimStyle, "  waiting for work…"))
 	}
 
 	// The running list scrolls independently: a wide review can have more
@@ -312,10 +324,10 @@ func (m model) viewWork() string {
 		hint = fmt.Sprintf("%d running · %d done (c)", m.countRunning(), len(done))
 	}
 	heading := m.sectionHeading("work", len(m.items), hint)
-	if m.focus == paneWork {
+	if m.focus == dashboardPaneWork {
 		// Mark the pane the arrows are driving, so a key press is never a
 		// guess about which list just moved.
-		heading = m.paint(styleValue, heading)
+		heading = m.paint(tuiTitleStyle, heading)
 	}
 	return m.clamp(heading, rows, m.workHeight())
 }
@@ -323,14 +335,14 @@ func (m model) viewWork() string {
 // splitItems partitions the work list. Running rows come first because they
 // are the answer to "what is it doing"; finished rows keep their most-recent
 // -first order so the most recent completion is the one you see.
-func (m model) splitItems() (running, done []*item) {
+func (m dashboardModel) splitItems() (running, done []*dashboardItem) {
 	for _, it := range m.items {
-		if it.state == stateRunning {
+		if it.state == dashboardStateRunning {
 			running = append(running, it)
 		}
 	}
 	for i := len(m.items) - 1; i >= 0; i-- {
-		if m.items[i].state != stateRunning {
+		if m.items[i].state != dashboardStateRunning {
 			done = append(done, m.items[i])
 		}
 	}
@@ -338,14 +350,14 @@ func (m model) splitItems() (running, done []*item) {
 }
 
 // workRows is how many rows the work region can show, heading included.
-func (m model) workRows() int {
+func (m dashboardModel) workRows() int {
 	return m.workHeight()
 }
 
 // workBodyRows is the room left for rows once the heading is drawn. When the
 // completed section is expanded it takes the rest, so the running list keeps
 // its own room rather than being squeezed away by history.
-func (m model) workBodyRows() int {
+func (m dashboardModel) workBodyRows() int {
 	rows := m.workHeight() - 1
 	if m.showCompleted {
 		rows /= 2
@@ -359,7 +371,7 @@ func (m model) workBodyRows() int {
 // scrollWindow shows a window of rows at offset, marking that more exist in
 // each direction so a partially visible list is never mistaken for a whole
 // one.
-func (m model) scrollWindow(rows []string, top int) []string {
+func (m dashboardModel) scrollWindow(rows []string, top int) []string {
 	height := m.workBodyRows()
 	if len(rows) <= height {
 		return rows
@@ -372,30 +384,30 @@ func (m model) scrollWindow(rows []string, top int) []string {
 	}
 	window := rows[top : top+height]
 	if top > 0 {
-		window = append([]string{m.paint(styleDim, fmt.Sprintf("  ↑ %d more", top))}, window...)
+		window = append([]string{m.paint(tuiDimStyle, fmt.Sprintf("  ↑ %d more", top))}, window...)
 		window = window[:height]
 	}
 	if top+height < len(rows) {
-		window[len(window)-1] += m.paint(styleDim, fmt.Sprintf(" ↓%d more", len(rows)-top-height))
+		window[len(window)-1] += m.paint(tuiDimStyle, fmt.Sprintf(" ↓%d more", len(rows)-top-height))
 	}
 	return window
 }
 
-func (m model) viewItem(it *item, frame string) string {
+func (m dashboardModel) viewItem(it *dashboardItem, frame string) string {
 	var icon, name, note string
 	switch it.state {
-	case stateRunning:
+	case dashboardStateRunning:
 		icon = frame
-		name = m.paint(styleValue, it.display())
+		name = m.paint(tuiTitleStyle, it.display())
 		note = m.itemNote(it)
-	case stateDone:
-		icon = m.paint(styleOK, "✓")
-		name = m.paint(styleDim, it.display())
-		note = m.paint(styleDim, m.costLine(it))
-	case stateFailed:
-		icon = m.paint(styleErr, "✗")
-		name = m.paint(styleErr, it.display())
-		note = m.paint(styleErr, it.err)
+	case dashboardStateDone:
+		icon = m.paint(tuiOKStyle, "✓")
+		name = m.paint(tuiDimStyle, it.display())
+		note = m.paint(tuiDimStyle, m.costLine(it))
+	case dashboardStateFailed:
+		icon = m.paint(tuiErrorStyle, "✗")
+		name = m.paint(tuiErrorStyle, it.display())
+		note = m.paint(tuiErrorStyle, it.err)
 	}
 	// A fixed icon column and a fixed name column are what make a dozen
 	// simultaneous rows scannable rather than a ragged mess.
@@ -406,43 +418,43 @@ func (m model) viewItem(it *item, frame string) string {
 // costLine is the right-hand column of a finished row: what it found, how long
 // it took, and what it spent. Findings first because that is why anyone looks,
 // then the two numbers that tell the story of the cost.
-func (m model) costLine(it *item) string {
+func (m dashboardModel) costLine(it *dashboardItem) string {
 	return fmt.Sprintf("%d findings · %s · %s",
 		it.findings, shortDuration(it.took), humanTokens(it.tokens))
 }
 
 // itemNote is the right-hand column of a running row: which round, what the
 // agent is doing right now, and what it has spent so far.
-func (m model) itemNote(it *item) string {
+func (m dashboardModel) itemNote(it *dashboardItem) string {
 	var b strings.Builder
 	// Rounds are published starting at 1, so a non-zero round is what
 	// distinguishes "in a round" from "still starting".
 	if it.round > 0 {
-		b.WriteString(m.paint(styleDim, fmt.Sprintf("round %d", it.round)))
+		b.WriteString(m.paint(tuiDimStyle, fmt.Sprintf("round %d", it.round)))
 	}
 	if it.tool != "" {
 		if b.Len() > 0 {
-			b.WriteString(m.paint(styleDim, " · "))
+			b.WriteString(m.paint(tuiDimStyle, " · "))
 		}
-		b.WriteString(m.paint(styleBusy, it.tool))
+		b.WriteString(m.paint(tuiBusyStyle, it.tool))
 	}
 	if b.Len() == 0 {
-		b.WriteString(m.paint(styleDim, "starting…"))
+		b.WriteString(m.paint(tuiDimStyle, "starting…"))
 	}
 	// Spend so far, kept last so the round and the current tool — the parts
 	// that change as the work proceeds — stay on the left where the eye lands.
 	if it.tokens > 0 {
 		if b.Len() > 0 {
-			b.WriteString(m.paint(styleDim, " · "))
+			b.WriteString(m.paint(tuiDimStyle, " · "))
 		}
-		b.WriteString(m.paint(styleBusy, "▲"+humanTokens(it.tokens)))
+		b.WriteString(m.paint(tuiBusyStyle, "▲"+humanTokens(it.tokens)))
 	}
 	return b.String()
 }
 
 // viewLog is the scrolling activity feed. It is the only region with history,
 // so it takes whatever height the work list does not need.
-func (m model) viewLog() string {
+func (m dashboardModel) viewLog() string {
 	heading := m.sectionHeading("activity", len(m.log), logHint(m.paused, m.holding()))
 
 	height := m.logHeight()
@@ -468,19 +480,19 @@ func (m model) viewLog() string {
 		rows = append(rows, m.viewLogEntry(e))
 	}
 	if len(rows) == 0 {
-		rows = append(rows, m.paint(styleDim, "  no activity yet"))
+		rows = append(rows, m.paint(tuiDimStyle, "  no activity yet"))
 	}
 	return m.clamp(heading, rows, height)
 }
 
-func (m model) viewLogEntry(e logEntry) string {
-	stamp := m.paint(styleDim, e.stamp)
+func (m dashboardModel) viewLogEntry(e dashboardLogEntry) string {
+	stamp := m.paint(tuiDimStyle, e.stamp)
 	var body string
 	switch e.kind {
-	case KindWarning, KindGroupFailed, KindToolError, KindBudgetReached:
-		body = m.paint(styleWarn, e.text)
-	case KindGroupStart, KindGroupDone, KindRoundStart, KindSkipped:
-		body = m.paint(styleDim, e.text)
+	case progress.KindWarning, progress.KindGroupFailed, progress.KindToolError, progress.KindBudgetReached:
+		body = m.paint(tuiWarnStyle, e.text)
+	case progress.KindGroupStart, progress.KindGroupDone, progress.KindRoundStart, progress.KindSkipped:
+		body = m.paint(tuiDimStyle, e.text)
 	default:
 		body = e.text
 	}
@@ -490,10 +502,10 @@ func (m model) viewLogEntry(e logEntry) string {
 // helpKeys names the scroll hint after the focused pane: one pair of arrows
 // now drives two lists, so the binding alone is not enough to know which one
 // will move.
-func (m model) helpKeys() []string {
+func (m dashboardModel) helpKeys() []string {
 	return []string{
 		"q detach",
-		"tab pane",
+		"tab dashboardPane",
 		"↑↓ " + m.focusName(),
 		"c completed",
 		"p pause log",
@@ -501,24 +513,24 @@ func (m model) helpKeys() []string {
 	}
 }
 
-func (m model) focusName() string {
-	if m.focus == paneWork {
+func (m dashboardModel) focusName() string {
+	if m.focus == dashboardPaneWork {
 		return "work"
 	}
 	return "log"
 }
 
-func (m model) viewHelp() string {
-	sep := m.paint(styleDim, "  ·  ")
-	help := m.paint(styleDim, strings.Join(m.helpKeys(), sep))
+func (m dashboardModel) viewHelp() string {
+	sep := m.paint(tuiDimStyle, "  ·  ")
+	help := m.paint(tuiDimStyle, strings.Join(m.helpKeys(), sep))
 	return clip(help, m.width)
 }
 
 // sectionHeading is the small label above a region, with a right-aligned hint.
-func (m model) sectionHeading(name string, count int, hint string) string {
-	left := m.paint(styleSection, name)
+func (m dashboardModel) sectionHeading(name string, count int, hint string) string {
+	left := m.paint(tuiSectionStyle, name)
 	if count > 0 {
-		left += m.paint(styleDim, fmt.Sprintf(" (%d)", count))
+		left += m.paint(tuiDimStyle, fmt.Sprintf(" (%d)", count))
 	}
 	if hint == "" {
 		return left
@@ -527,12 +539,12 @@ func (m model) sectionHeading(name string, count int, hint string) string {
 	if gap < 2 {
 		return left
 	}
-	return left + strings.Repeat(" ", gap) + m.paint(styleDim, hint)
+	return left + strings.Repeat(" ", gap) + m.paint(tuiDimStyle, hint)
 }
 
 // clamp joins a heading to its rows and cuts the result to exactly height
 // lines, so a long list can never push the keybindings off screen.
-func (m model) clamp(heading string, rows []string, height int) string {
+func (m dashboardModel) clamp(heading string, rows []string, height int) string {
 	all := append([]string{heading}, rows...)
 	if height > 0 && len(all) > height {
 		all = all[:height]
@@ -543,7 +555,7 @@ func (m model) clamp(heading string, rows []string, height int) string {
 // Layout arithmetic: the work list and the log split whatever the fixed rows
 // leave, each with a floor and the work list with a ceiling.
 
-func (m model) flexibleRows() int {
+func (m dashboardModel) flexibleRows() int {
 	rows := m.height - fixedRows
 	if rows < minWorkRows+minLogRows {
 		return minWorkRows + minLogRows
@@ -551,7 +563,7 @@ func (m model) flexibleRows() int {
 	return rows
 }
 
-func (m model) workHeight() int {
+func (m dashboardModel) workHeight() int {
 	rows := m.flexibleRows() / 3
 	if rows < minWorkRows {
 		rows = minWorkRows
@@ -564,11 +576,11 @@ func (m model) workHeight() int {
 
 // logHeight is whatever the work list did not take. workHeight counts its own
 // heading, so the subtraction below is against the body rows alone.
-func (m model) logHeight() int {
+func (m dashboardModel) logHeight() int {
 	return m.flexibleRows() - (m.workHeight() - 1)
 }
 
-func (m model) countRunning() int { return m.running }
+func (m dashboardModel) countRunning() int { return m.running }
 
 // finishedFiles is the bar's numerator: files the run is actually done with.
 //
@@ -578,11 +590,11 @@ func (m model) countRunning() int { return m.running }
 // total that never contained them. A scan that discovered 759 files, skipped
 // 272 and selected 487 would open at 320/487 instead of 0/487. They are not
 // lost: the status row reports the skipped count separately.
-func (m model) finishedFiles() int {
+func (m dashboardModel) finishedFiles() int {
 	return m.reusedFiles + m.doneFiles + m.failedFiles
 }
 
-func (m model) nameWidth() int {
+func (m dashboardModel) nameWidth() int {
 	w := m.width - 12
 	switch {
 	case w < 16:
@@ -615,12 +627,12 @@ func joinEnds(width int, left, right string) string {
 	return left + strings.Repeat(" ", gap) + right
 }
 
-func identity(provider, model string) string {
+func identity(provider, dashboardModel string) string {
 	switch {
-	case provider != "" && model != "":
-		return provider + "/" + model
-	case model != "":
-		return model
+	case provider != "" && dashboardModel != "":
+		return provider + "/" + dashboardModel
+	case dashboardModel != "":
+		return dashboardModel
 	default:
 		return provider
 	}
@@ -657,14 +669,16 @@ func pad(s string, n int) string {
 // these rows are status lines that update many times a second: a trailing
 // ellipsis on every row would be noise, and a wrapping status line would
 // break the fixed height the layout depends on.
+// clip cuts s to n columns, marking the cut with an ellipsis.
+//
+// ansi.Truncate counts the printable columns of a styled string rather than
+// its bytes, so a row that carries colour is cut where it looks cut. The
+// ellipsis says the row continues past the edge, which a hard cut does not.
 func clip(s string, n int) string {
 	if n <= 0 {
 		return ""
 	}
-	if lipgloss.Width(s) <= n {
-		return s
-	}
-	return lipgloss.NewStyle().MaxWidth(n).Render(s)
+	return ansi.Truncate(s, n, "…")
 }
 
 // shortenPath keeps the tail of a path, which is the part that identifies it.

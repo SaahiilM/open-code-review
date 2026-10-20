@@ -326,9 +326,12 @@ terminal, keeping the tail, which is the identifying end.
 The dashboard starts only when all of these hold, so pipes, CI, and scripted
 use are unaffected and never see an alternate screen:
 
-- stdout is a terminal (and `TERM` is not `dumb`)
+- stdin and stdout are terminals (and `TERM` is not `dumb`)
 - `--format text`
 - `--audience human`
+
+A terminal smaller than 40x12 is told to enlarge itself rather than shown a
+frame that would not fit.
 
 `--tui` turns it on explicitly. The dashboard starts without its own signal
 handler, so an interrupt that arrives outside it still goes to the run's

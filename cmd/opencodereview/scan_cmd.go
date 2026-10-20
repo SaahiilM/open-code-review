@@ -252,7 +252,7 @@ func executeScanContext(ctx context.Context, opts scanOptions) (retErr error) {
 	// Same live dashboard as review, and for the same reason: a full-repo scan
 	// dispatches per-file work for a long time, and the caller has no other way
 	// to tell a slow scan from a stuck one.
-	runner := progress.Start(progress.Options{
+	runner := startProgressDashboard(progressOptions{
 		Title:           "scan",
 		Repo:            cc.RepoDir,
 		Model:           rt.Model,
@@ -280,7 +280,7 @@ func executeScanContext(ctx context.Context, opts scanOptions) (retErr error) {
 	}
 	startTime := time.Now()
 
-	comments, err := progress.During(runner, func() ([]model.LlmComment, error) {
+	comments, err := duringProgressDashboard(runner, func() ([]model.LlmComment, error) {
 		return ag.Run(ctx)
 	})
 	if err != nil {

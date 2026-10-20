@@ -10,8 +10,13 @@
 // Events published here reach one of two consumers. The default text sink
 // prints each event as the [ocr] line it always was, so piped, CI, and
 // --format json/sarif runs are byte-for-byte unchanged. When a human is
-// watching an interactive terminal, a Bubble Tea program consumes the same
-// events and draws a live dashboard instead.
+// watching an interactive terminal, the command layer installs a Sink of its
+// own — the live dashboard in cmd/opencodereview — which consumes the same
+// events and draws a full-screen view instead.
+//
+// The split is deliberate. This package owns the event stream and the plain
+// text that has always been printed; the terminal UI lives with the other
+// terminal UI, next to the provider wizard it shares a palette with.
 //
 // Preserving the text output is a contract, not an accident: an event that
 // exists only to update the dashboard (a group starting, a round beginning)
@@ -132,8 +137,13 @@ type Event struct {
 	Time   time.Time
 }
 
-// sink consumes published events. Exactly one is installed at a time.
-type sink interface {
+// Sink consumes published events. Exactly one is installed at a time.
+//
+// It is exported because the interactive dashboard lives outside this package:
+// it implements Sink and installs itself for the duration of a run. The
+// package that owns the pipeline publishes events; the package that owns the
+// terminal decides how they are shown.
+type Sink interface {
 	Publish(Event)
 }
 
@@ -145,7 +155,7 @@ var (
 	// these were bare fmt.Fprintf calls to stdout.Writer(), and tests that
 	// capture progress with stdout.Swap depend on that. Silence is expressed
 	// by pointing stdout.Writer() at io.Discard, not by swapping this.
-	active sink = defaultText
+	active Sink = defaultText
 )
 
 // defaultText is the one text sink, shared so that its mutex serialises every
@@ -229,9 +239,9 @@ func Warningf(format string, a ...any) {
 // accepts an Event, which the progress package already exports.
 func SetSinkForTest(s func(Event)) func() {
 	if s == nil {
-		return set(nil)
+		return Install(nil)
 	}
-	return set(sinkFunc(s))
+	return Install(sinkFunc(s))
 }
 
 // sinkFunc adapts a plain function to the sink interface.
@@ -239,17 +249,16 @@ type sinkFunc func(Event)
 
 func (f sinkFunc) Publish(ev Event) { f(ev) }
 
-// set installs s as the sink for subsequent events and returns a function
-// that restores the previous one. Like stdout.Swap, the restore must run on
-// the same goroutine that called it: nested or concurrent swaps restore in a
-// non-deterministic order.
+// Install installs s as the sink for subsequent events and returns a function
+// that restores the previous one.
+//
+// It exists for the interactive dashboard, which lives outside this package
+// and installs itself for the duration of a run. Like stdout.Swap, the
+// restore must run on the same goroutine that called Install: nested or
+// concurrent swaps restore in a non-deterministic order.
 //
 // s may be nil, which discards.
-//
-// It is unexported on purpose. The sink type is unexported too, so an exported
-// Set would advertise an extension point that no package outside this one
-// could actually use.
-func set(s sink) func() {
+func Install(s Sink) func() {
 	mu.Lock()
 	old := active
 	if s == nil {

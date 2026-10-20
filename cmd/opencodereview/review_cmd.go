@@ -271,7 +271,7 @@ func executeReviewContext(ctx context.Context, opts reviewOptions) (retErr error
 	// interactive text run. The runner installs the progress sink that
 	// newQuietHandle only redirected, and is torn down before the report is
 	// written so the report lands on a restored terminal.
-	runner := progress.Start(progress.Options{
+	runner := startProgressDashboard(progressOptions{
 		Title:           "review",
 		Repo:            cc.RepoDir,
 		Model:           rt.Model,
@@ -299,7 +299,7 @@ func executeReviewContext(ctx context.Context, opts reviewOptions) (retErr error
 	}
 	startTime := time.Now()
 
-	comments, runErr := progress.During(runner, func() ([]model.LlmComment, error) {
+	comments, runErr := duringProgressDashboard(runner, func() ([]model.LlmComment, error) {
 		return ag.Run(runCtx)
 	})
 	manifest := ag.RunManifest()

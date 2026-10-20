@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 alibaba/open-code-review Contributors
 
-package progress
+package main
 
 import (
 	"bytes"
@@ -14,6 +14,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"testing"
 
+	"github.com/alibaba/open-code-review/internal/progress"
 	"github.com/alibaba/open-code-review/internal/stdout"
 )
 
@@ -23,15 +24,15 @@ func TestEnabledRejectsEveryNonInteractiveCase(t *testing.T) {
 	// stdout to itself.
 	cases := []struct {
 		name string
-		opts Options
+		opts progressOptions
 	}{
-		{"not opted in", Options{Audience: "human"}},
-		{"agent audience", Options{Audience: "agent", Enabled: true}},
-		{"json output", Options{Audience: "human", Enabled: true, MachineReadable: true}},
-		{"sarif output", Options{Audience: "human", Enabled: true, MachineReadable: true}},
+		{"not opted in", progressOptions{Audience: "human"}},
+		{"agent audience", progressOptions{Audience: "agent", Enabled: true}},
+		{"json output", progressOptions{Audience: "human", Enabled: true, MachineReadable: true}},
+		{"sarif output", progressOptions{Audience: "human", Enabled: true, MachineReadable: true}},
 	}
 	for _, c := range cases {
-		if Enabled(c.opts) {
+		if progressDashboardEnabled(c.opts) {
 			t.Errorf("%s: the dashboard must not run", c.name)
 		}
 	}
@@ -45,13 +46,13 @@ func TestStartWithoutATerminalFallsBackToText(t *testing.T) {
 	restore := stdout.Swap(&buf)
 	defer restore()
 
-	r := Start(Options{Audience: "human"})
+	r := startProgressDashboard(progressOptions{Audience: "human"})
 	defer r.Stop()
 
 	if r.prog != nil {
 		t.Fatal("no program should be built when stdout is not a terminal")
 	}
-	Noticef("plain line\n")
+	progress.Noticef("plain line\n")
 	if !strings.Contains(buf.String(), "[ocr] plain line") {
 		t.Errorf("expected the text line, got %q", buf.String())
 	}
@@ -65,10 +66,10 @@ func TestStartWithAgentAudienceStaysSilent(t *testing.T) {
 	restore := stdout.Quiet()
 	defer restore()
 
-	r := Start(Options{Audience: "agent"})
+	r := startProgressDashboard(progressOptions{Audience: "agent"})
 	defer r.Stop()
 
-	Noticef("must not appear\n")
+	progress.Noticef("must not appear\n")
 
 	// Now prove the summary still gets out: restoring stdout is enough.
 	restored := stdout.Swap(os.Stdout)
@@ -77,7 +78,7 @@ func TestStartWithAgentAudienceStaysSilent(t *testing.T) {
 	restored2 := stdout.Swap(&buf)
 	defer restored2()
 
-	Noticef("[ocr] Summary: restored\n")
+	progress.Noticef("[ocr] Summary: restored\n")
 	if !strings.Contains(buf.String(), "Summary: restored") {
 		t.Errorf("after stdout is restored the summary must print, got %q", buf.String())
 	}
@@ -88,14 +89,14 @@ func TestStartLeavesTheSinkAloneWhenNotInteractive(t *testing.T) {
 	// nothing for Stop to restore and no second silencing mechanism to fall
 	// out of step with stdout's.
 	before := &sinkRecorder{}
-	restoreFirst := set(before)
+	restoreFirst := progress.Install(before)
 	defer restoreFirst()
 
-	r := Start(Options{Audience: "human"})
+	r := startProgressDashboard(progressOptions{Audience: "human"})
 	if r.restore != nil {
 		t.Error("a text-mode run must not install a sink")
 	}
-	Noticef("straight through\n")
+	progress.Noticef("straight through\n")
 	r.Stop()
 
 	if len(before.all()) != 1 {
@@ -104,10 +105,10 @@ func TestStartLeavesTheSinkAloneWhenNotInteractive(t *testing.T) {
 }
 
 func TestDuringRunsInlineWithoutAProgram(t *testing.T) {
-	r := Start(Options{Audience: "agent"})
+	r := startProgressDashboard(progressOptions{Audience: "agent"})
 	defer r.Stop()
 
-	got, err := During(r, func() (string, error) {
+	got, err := duringProgressDashboard(r, func() (string, error) {
 		return "done", nil
 	})
 	if got != "done" || err != nil {
@@ -117,10 +118,10 @@ func TestDuringRunsInlineWithoutAProgram(t *testing.T) {
 
 func TestDuringPropagatesTheRunsError(t *testing.T) {
 	want := errors.New("all reviews failed")
-	r := Start(Options{Audience: "agent"})
+	r := startProgressDashboard(progressOptions{Audience: "agent"})
 	defer r.Stop()
 
-	got, err := During(r, func() (int, error) { return 7, want })
+	got, err := duringProgressDashboard(r, func() (int, error) { return 7, want })
 	if !errors.Is(err, want) {
 		t.Errorf("During must return the run's own error unchanged, got %v", err)
 	}
@@ -132,19 +133,19 @@ func TestDuringPropagatesTheRunsError(t *testing.T) {
 func TestStopIsIdempotent(t *testing.T) {
 	// A deferred Stop alongside an explicit one is the normal shape at a call
 	// site, so a second call must be harmless.
-	r := Start(Options{Audience: "agent"})
+	r := startProgressDashboard(progressOptions{Audience: "agent"})
 	r.Stop()
 	r.Stop()
 	r.Stop()
 }
 
 func TestNilRunnerIsUsable(t *testing.T) {
-	// Callers should never have to nil-check, so a nil Runner behaves as a
+	// Callers should never have to nil-check, so a nil progressRunner behaves as a
 	// runner with no dashboard.
-	var r *Runner
+	var r *progressRunner
 	defer r.Stop()
 
-	got, err := During(r, func() (bool, error) { return true, nil })
+	got, err := duringProgressDashboard(r, func() (bool, error) { return true, nil })
 	if !got || err != nil {
 		t.Errorf("a nil runner must run inline, got (%v, %v)", got, err)
 	}
@@ -155,21 +156,21 @@ func TestTUISinkForwardsToSend(t *testing.T) {
 		mu   sync.Mutex
 		sent []tea.Msg
 	)
-	s := tuiSink{send: func(msg tea.Msg) {
+	s := dashboardSink{send: func(msg tea.Msg) {
 		mu.Lock()
 		defer mu.Unlock()
 		sent = append(sent, msg)
 	}}
-	s.Publish(Event{Kind: KindNotice, Text: "hi\n"})
+	s.Publish(progress.Event{Kind: progress.KindNotice, Text: "hi\n"})
 
 	mu.Lock()
 	defer mu.Unlock()
 	if len(sent) != 1 {
 		t.Fatalf("expected 1 forwarded message, got %d", len(sent))
 	}
-	ev, ok := sent[0].(eventMsg)
+	ev, ok := sent[0].(dashboardEventMsg)
 	if !ok {
-		t.Fatalf("expected an eventMsg, got %T", sent[0])
+		t.Fatalf("expected an dashboardEventMsg, got %T", sent[0])
 	}
 	if ev.Text != "hi\n" {
 		t.Errorf("forwarded text = %q", ev.Text)
@@ -196,28 +197,28 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
-// testRunner builds a Runner whose program is wired to pipes, so the real
+// testRunner builds a progressRunner whose program is wired to pipes, so the real
 // Bubble Tea loop runs end to end without a terminal. This is the only way to
 // cover the path a live dashboard actually takes.
-func testRunner(t *testing.T, opts Options) (*Runner, *syncBuffer) {
+func testRunner(t *testing.T, opts progressOptions) (*progressRunner, *syncBuffer) {
 	t.Helper()
 	out := &syncBuffer{}
-	m := newModel(opts, opts.TotalFiles)
+	m := newDashboardModel(opts, opts.TotalFiles)
 	prog := tea.NewProgram(m, tea.WithInput(strings.NewReader("")), tea.WithOutput(out))
-	return newTUIRunner(prog), out
+	return newDashboardRunner(prog), out
 }
 
 func TestDuringRunsTheProgramAndReturnsTheResult(t *testing.T) {
-	r, out := testRunner(t, Options{Title: "review", TotalFiles: 4})
+	r, out := testRunner(t, progressOptions{Title: "review", TotalFiles: 4})
 	defer r.Stop()
 
-	got, err := During(r, func() (int, error) {
+	got, err := duringProgressDashboard(r, func() (int, error) {
 		// Stand in for a review. It publishes progress and then simply
 		// returns — it must not have to dismiss the dashboard itself, or a
 		// real run would hang on a screen nobody is going to close.
-		Publish(Event{Kind: KindPlanned, Files: 4})
-		Publish(Event{Kind: KindGroupStart, Group: "a.go", Paths: []string{"a.go"}, Text: "reviewing a.go\n"})
-		Publish(Event{Kind: KindGroupDone, Group: "a.go", Files: 1, Findings: 2, Text: "a.go: 2 finding(s)\n"})
+		progress.Publish(progress.Event{Kind: progress.KindPlanned, Files: 4})
+		progress.Publish(progress.Event{Kind: progress.KindGroupStart, Group: "a.go", Paths: []string{"a.go"}, Text: "reviewing a.go\n"})
+		progress.Publish(progress.Event{Kind: progress.KindGroupDone, Group: "a.go", Files: 1, Findings: 2, Text: "a.go: 2 finding(s)\n"})
 		return 42, nil
 	})
 
@@ -234,19 +235,19 @@ func TestDuringRunsTheProgramAndReturnsTheResult(t *testing.T) {
 }
 
 func TestEventsReachTheModelThroughTheProgram(t *testing.T) {
-	// The stronger assertion than the one above: the model's final state has
+	// The stronger assertion than the one above: the dashboard's final state has
 	// to reflect what the pipeline published while the program was running.
 	out := &syncBuffer{}
-	m := newModel(Options{Title: "review"}, 4)
+	m := newDashboardModel(progressOptions{Title: "review"}, 4)
 	prog := tea.NewProgram(m, tea.WithInput(strings.NewReader("")), tea.WithOutput(out))
-	sink := tuiSink{send: prog.Send}
+	sink := dashboardSink{send: prog.Send}
 
 	go func() {
-		sink.Publish(Event{Kind: KindPlanned, Files: 4})
-		sink.Publish(Event{Kind: KindGroupStart, Group: "a.go", Paths: []string{"a.go"}, Text: "reviewing a.go\n"})
-		sink.Publish(Event{Kind: KindToolStart, Group: "a.go", Detail: "file_read"})
-		sink.Publish(Event{Kind: KindGroupDone, Group: "a.go", Files: 1, Findings: 3, Text: "done\n"})
-		sink.Publish(Event{Kind: KindNotice, Text: "quitting\n"})
+		sink.Publish(progress.Event{Kind: progress.KindPlanned, Files: 4})
+		sink.Publish(progress.Event{Kind: progress.KindGroupStart, Group: "a.go", Paths: []string{"a.go"}, Text: "reviewing a.go\n"})
+		sink.Publish(progress.Event{Kind: progress.KindToolStart, Group: "a.go", Detail: "file_read"})
+		sink.Publish(progress.Event{Kind: progress.KindGroupDone, Group: "a.go", Files: 1, Findings: 3, Text: "done\n"})
+		sink.Publish(progress.Event{Kind: progress.KindNotice, Text: "quitting\n"})
 		prog.Quit()
 	}()
 
@@ -254,28 +255,28 @@ func TestEventsReachTheModelThroughTheProgram(t *testing.T) {
 	if err != nil {
 		t.Fatalf("program run: %v", err)
 	}
-	got := final.(model)
+	got := final.(dashboardModel)
 	if got.totalFiles != 4 {
 		t.Errorf("totalFiles = %d, want 4", got.totalFiles)
 	}
 	if got.findings != 3 {
 		t.Errorf("findings = %d, want 3", got.findings)
 	}
-	if len(got.items) != 1 || got.items[0].state != stateDone {
+	if len(got.items) != 1 || got.items[0].state != dashboardStateDone {
 		t.Errorf("expected one finished row, got %+v", got.items)
 	}
 }
 
 func TestInitAndTickAdvanceTheLoop(t *testing.T) {
-	m := newModel(Options{Title: "review"}, 1)
+	m := newDashboardModel(progressOptions{Title: "review"}, 1)
 	if cmd := m.Init(); cmd == nil {
 		t.Fatal("Init must start the spinner and the clock")
 	}
-	upd, cmd := m.Update(tickMsg(time.Now()))
+	upd, cmd := m.Update(dashboardTickMsg(time.Now()))
 	if cmd == nil {
 		t.Error("a tick must schedule the next one, or the clock and spinner freeze")
 	}
-	if upd.(model).spinner.View() == "" {
+	if upd.(dashboardModel).spinner.View() == "" {
 		t.Error("the spinner should render a frame after a tick")
 	}
 }
@@ -307,7 +308,7 @@ func TestLogHintCoversEveryState(t *testing.T) {
 // not deadlock against Run and that a detaching dashboard never stalls the
 // pipeline it is reporting on.
 func TestDetachMidRunDoesNotBlockTheRun(t *testing.T) {
-	r, _ := testRunner(t, Options{Title: "review", TotalFiles: 3})
+	r, _ := testRunner(t, progressOptions{Title: "review", TotalFiles: 3})
 	defer r.Stop()
 	prog := r.prog
 
@@ -316,7 +317,7 @@ func TestDetachMidRunDoesNotBlockTheRun(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for range 50 {
-			Publish(Event{Kind: KindToolStart, Group: "a.go", Detail: "file_read", Text: "  \u25b6 file_read\n"})
+			progress.Publish(progress.Event{Kind: progress.KindToolStart, Group: "a.go", Detail: "file_read", Text: "  \u25b6 file_read\n"})
 		}
 		time.Sleep(50 * time.Millisecond)
 		prog.Quit()
@@ -326,7 +327,7 @@ func TestDetachMidRunDoesNotBlockTheRun(t *testing.T) {
 	go func() { wg.Wait(); close(done) }()
 
 	start := time.Now()
-	got, err := During(r, func() (int, error) {
+	got, err := duringProgressDashboard(r, func() (int, error) {
 		<-done
 		return 7, nil
 	})
@@ -336,4 +337,23 @@ func TestDetachMidRunDoesNotBlockTheRun(t *testing.T) {
 	if got != 7 || err != nil {
 		t.Errorf("During = (%d, %v), want (7, nil)", got, err)
 	}
+}
+
+// sinkRecorder collects published events so a test can assert what reached
+// the installed sink.
+type sinkRecorder struct {
+	mu     sync.Mutex
+	events []progress.Event
+}
+
+func (r *sinkRecorder) Publish(ev progress.Event) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, ev)
+}
+
+func (r *sinkRecorder) all() []progress.Event {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]progress.Event(nil), r.events...)
 }

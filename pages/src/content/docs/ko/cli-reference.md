@@ -304,9 +304,12 @@ Concurrent map access without a lock — wrap with sync.RWMutex.
 대시보드는 다음 조건이 모두 맞을 때만 시작하므로, 파이프, CI, 스크립트 사용은
 영향을 받지 않고 대체 화면도 나타나지 않습니다:
 
-- stdout이 터미널이고(`TERM`이 `dumb`도 아님)
+- stdin과 stdout이 모두 터미널이고(`TERM`이 `dumb`도 아님)
 - `--format text`
 - `--audience human`
+
+40x12보다 작은 터미널에는 들어가지 않는 화면을 그리는 대신 키우라는
+안내를 보여 줍니다.
 
 `--tui`는 이를 명시적으로 켭니다. 대시보드는 자체 신호 핸들러를 두지 않아서,
 밖에서 온 인터럽트는 실행의 신호 처리로 갑니다. 대시보드 안에서 누른

@@ -16,8 +16,8 @@ import (
 )
 
 // captureStdoutFor redirects stdout.Writer to w for the duration of the test.
-// The text sink writes there rather than to os.Stdout directly, so this is
-// both how the sink is exercised and how the tool's real stdout/stderr routing
+// The text Sink writes there rather than to os.Stdout directly, so this is
+// both how the Sink is exercised and how the tool's real stdout/stderr routing
 // is asserted.
 func captureStdoutFor(w io.Writer) func() {
 	return stdout.Swap(w)
@@ -41,11 +41,11 @@ func (r *sinkRecorder) all() []Event {
 	return append([]Event(nil), r.events...)
 }
 
-// install points the package at s and restores the previous sink afterwards.
-func install(t *testing.T, s sink) {
+// install points the package at s and restores the previous Sink afterwards.
+func install(t *testing.T, s Sink) {
 	t.Helper()
 	resetDiag(t)
-	t.Cleanup(set(s))
+	t.Cleanup(Install(s))
 }
 
 // resetDiag empties the process-wide diagnostic buffer and fails the test if it
@@ -109,26 +109,26 @@ func TestSetNilDiscards(t *testing.T) {
 	install(t, nil)
 	Noticef("must not appear\n")
 	if buf.Len() != 0 {
-		t.Errorf("a nil sink must discard, got %q", buf.String())
+		t.Errorf("a nil Sink must discard, got %q", buf.String())
 	}
 }
 
 func TestSetRestoresPrevious(t *testing.T) {
 	first := &sinkRecorder{}
-	restoreFirst := set(first)
+	restoreFirst := Install(first)
 	defer restoreFirst()
 
 	second := &sinkRecorder{}
-	restoreSecond := set(second)
+	restoreSecond := Install(second)
 	Noticef("goes to second\n")
 	restoreSecond()
 
 	Noticef("goes to first\n")
 	if len(second.all()) != 1 {
-		t.Errorf("second sink should have received only its own event, got %d", len(second.all()))
+		t.Errorf("second Sink should have received only its own event, got %d", len(second.all()))
 	}
 	if len(first.all()) != 1 {
-		t.Errorf("first sink should have received the event after restore, got %d", len(first.all()))
+		t.Errorf("first Sink should have received the event after restore, got %d", len(first.all()))
 	}
 }
 
@@ -258,7 +258,7 @@ func TestErrWriterCapsUnterminatedLine(t *testing.T) {
 }
 
 func TestErrWriterReachesStderrWithoutTUI(t *testing.T) {
-	// With the text sink installed there is no dashboard to protect, so
+	// With the text Sink installed there is no dashboard to protect, so
 	// diagnostics go straight to stderr exactly as they always did.
 	install(t, &textSink{})
 	out := captureStderr(t, func() {
@@ -269,7 +269,7 @@ func TestErrWriterReachesStderrWithoutTUI(t *testing.T) {
 	}
 }
 
-// The text sink adds the "[ocr] " prefix itself, so a diagnostic that
+// The text Sink adds the "[ocr] " prefix itself, so a diagnostic that
 // already carries one would show it twice in the dashboard's log. A
 // diagnostic written straight to stderr brings its own prefix, because the
 // diag writer does not add one.
@@ -283,7 +283,7 @@ func TestErrWriterStripsThePrefixForTheDashboardLog(t *testing.T) {
 	got := rec.all()
 	for _, ev := range got {
 		if strings.HasPrefix(ev.Text, "[ocr] ") {
-			t.Errorf("dashboard log row kept the text sink's prefix: %q", ev.Text)
+			t.Errorf("dashboard log row kept the text Sink's prefix: %q", ev.Text)
 		}
 	}
 	if len(got) != 2 {
@@ -347,7 +347,7 @@ func TestTextOutputIsUnchangedByTheMigration(t *testing.T) {
 // TestTextSinkIgnoresStatelessEvents is the regression guard for a subtle one.
 // The dashboard-only kinds (a group starting, a round beginning, the coverage
 // denominator) carry no Text, because the pipeline already prints its own line
-// for those facts. A sink that wrote the prefix for them anyway would emit
+// for those facts. A Sink that wrote the prefix for them anyway would emit
 // "[ocr] " with no newline, and the next real line would run into it — which
 // looks exactly like a doubled prefix on that line rather than like the stray
 // newline-free write it is.
@@ -366,5 +366,43 @@ func TestTextSinkIgnoresStatelessEvents(t *testing.T) {
 	want := "[ocr] reviewing a.go\n"
 	if got := buf.String(); got != want {
 		t.Errorf("stateless events leaked into the text stream.\n got: %q\nwant: %q", got, want)
+	}
+}
+
+func TestPublishIsSafeForConcurrentGroups(t *testing.T) {
+	// The pipeline publishes from one goroutine per in-flight group.
+	var buf = new(strings.Builder)
+	restore := captureStdoutFor(buf)
+	defer restore()
+
+	install(t, &textSink{})
+	done := make(chan struct{})
+	for i := range 8 {
+		go func() {
+			defer func() { done <- struct{}{} }()
+			for range 20 {
+				Noticef("group %d line\n", i)
+			}
+		}()
+	}
+	for range 8 {
+		<-done
+	}
+	if got := strings.Count(buf.String(), "\n"); got != 160 {
+		t.Errorf("expected 160 lines, got %d — a write was torn", got)
+	}
+}
+
+func TestSkippedFilesPrintNoTextLine(t *testing.T) {
+	// The caller prints its own per-file line; the skip event must not add a
+	// second one to piped output.
+	var buf = new(strings.Builder)
+	restore := captureStdoutFor(buf)
+	defer restore()
+
+	install(t, &textSink{})
+	Skipped("a.ts", "binary file", "Skipping a.ts — binary file\n")
+	if got := buf.String(); strings.Count(got, "Skipping") != 1 {
+		t.Errorf("expected exactly one line, got %q", got)
 	}
 }

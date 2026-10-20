@@ -1,19 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 alibaba/open-code-review Contributors
 
-package progress
+package main
 
 import (
-	"os"
 	"sync"
 	"sync/atomic"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/charmbracelet/x/term"
+
+	"github.com/alibaba/open-code-review/internal/progress"
 )
 
-// Options describes the run the dashboard is reporting on.
-type Options struct {
+// progressOptions describes the run the dashboard is reporting on.
+type progressOptions struct {
 	// Title names the operation, shown in the header ("review", "scan").
 	Title string
 	// Subtitle is optional secondary context.
@@ -57,13 +57,13 @@ type Options struct {
 	Cancel func()
 
 	// TotalFiles is the coverage denominator, when the caller already knows
-	// it. Zero leaves the bar empty until a KindPlanned event sets it, which
+	// it. Zero leaves the bar empty until a progress.KindPlanned event sets it, which
 	// is the normal path: the run freezes the denominator only after
 	// selection has settled.
 	TotalFiles int
 }
 
-// Enabled reports whether the dashboard should run at all.
+// progressDashboardEnabled reports whether the dashboard should run at all.
 //
 // Every condition here is a case where a full-screen alternate-buffer program
 // would be wrong: a pipe has no screen to draw on, --audience agent wants
@@ -72,7 +72,7 @@ type Options struct {
 //
 // Color is deliberately not a condition. `--color=never` disables color, not
 // the dashboard; the run still gets a live view, drawn plainly.
-func Enabled(o Options) bool {
+func progressDashboardEnabled(o progressOptions) bool {
 	switch {
 	case !o.Enabled:
 		return false
@@ -80,17 +80,15 @@ func Enabled(o Options) bool {
 		return false
 	case o.MachineReadable:
 		return false
-	case os.Getenv("TERM") == "dumb":
-		return false
-	case !term.IsTerminal(os.Stdout.Fd()):
+	case !interactiveTerminal():
 		return false
 	}
 	return true
 }
 
-// Runner owns the dashboard for the duration of one run. The zero value is a
+// progressRunner owns the dashboard for the duration of one run. The zero value is a
 // valid runner that does nothing, so callers never have to nil-check.
-type Runner struct {
+type progressRunner struct {
 	prog    *tea.Program
 	restore func()
 	tokens  func() (int64, int64)
@@ -101,22 +99,22 @@ type Runner struct {
 	ran atomic.Bool
 }
 
-// tuiSink bridges the pipeline's Publish calls into the Bubble Tea update loop.
+// dashboardSink bridges the pipeline's Publish calls into the Bubble Tea update loop.
 // Program.Send is documented as safe for concurrent use, which is what lets
 // eight group goroutines report without any locking on this side.
-type tuiSink struct{ send func(tea.Msg) }
+type dashboardSink struct{ send func(tea.Msg) }
 
-func (s tuiSink) Publish(ev Event) { s.send(eventMsg{Event: ev}) }
+func (s dashboardSink) Publish(ev progress.Event) { s.send(dashboardEventMsg{Event: ev}) }
 
-// Start installs the sink this run should use. When the dashboard is enabled
+// startProgressDashboard installs the sink this run should use. When the dashboard is enabled
 // it also builds the program; otherwise the run gets the plain text sink, or a
 // discarding one if the audience asked for silence.
 //
-// The returned Runner must be released with Stop.
-func Start(o Options) *Runner {
-	r := &Runner{}
+// The returned progressRunner must be released with Stop.
+func startProgressDashboard(o progressOptions) *progressRunner {
+	r := &progressRunner{}
 
-	if !Enabled(o) {
+	if !progressDashboardEnabled(o) {
 		// Leave the default text sink in place rather than installing one
 		// here. It already writes to stdout.Writer(), which is how
 		// --audience agent's silence and --format json's stderr redirection
@@ -127,11 +125,11 @@ func Start(o Options) *Runner {
 		return r
 	}
 
-	m := newModel(o, o.TotalFiles)
-	return newTUIRunner(newProgram(m))
+	m := newDashboardModel(o, o.TotalFiles)
+	return newDashboardRunner(newDashboardProgram(m))
 }
 
-// newProgram builds the dashboard's Bubble Tea program.
+// newDashboardProgram builds the dashboard's Bubble Tea program.
 //
 // The two options are load-bearing. WithoutSignalHandler: the run's own
 // signal handling owns cancellation, and a bubbletea SIGINT handler would
@@ -139,27 +137,32 @@ func Start(o Options) *Runner {
 // shutdown path depends on. WithFPS: the loop already redraws on every
 // message, and messages arrive at tool-call granularity, so an uncapped frame
 // rate spends a bursty run's time writing to the terminal.
-func newProgram(m model) *tea.Program {
-	return tea.NewProgram(m, tea.WithoutSignalHandler(), tea.WithFPS(20))
+func newDashboardProgram(m dashboardModel) *tea.Program {
+	return tea.NewProgram(m,
+		tea.WithoutSignalHandler(),
+		tea.WithFPS(20),
+		tea.WithColorProfile(progressColorProfile()),
+	)
 }
 
-// newTUIRunner wires a program up as the progress sink. It is separate from
-// Start so a test can supply a program wired to pipes and drive the real
-// program loop without a terminal.
-func newTUIRunner(prog *tea.Program) *Runner {
-	return &Runner{
+// newDashboardRunner wires a program up as the progress sink. It is separate from
+// startProgressDashboard so a test can supply a program wired to pipes and
+// drive the real program loop without a terminal.
+func newDashboardRunner(prog *tea.Program) *progressRunner {
+	return &progressRunner{
 		prog:    prog,
-		restore: set(tuiSink{send: prog.Send}),
+		restore: progress.Install(dashboardSink{send: prog.Send}),
 	}
 }
 
-// During runs fn with the dashboard up and returns whatever fn returns.
+// duringProgressDashboard runs fn with the dashboard up and returns whatever fn
+// returns.
 //
 // In text mode this is a direct call, so the non-interactive path costs one
 // function indirection and nothing else. In TUI mode fn runs on its own
 // goroutine while the program renders, and the dashboard is torn down before
 // this returns — the caller writes its report to a restored terminal.
-func During[T any](r *Runner, fn func() (T, error)) (T, error) {
+func duringProgressDashboard[T any](r *progressRunner, fn func() (T, error)) (T, error) {
 	if r == nil || r.prog == nil {
 		return fn()
 	}
@@ -201,7 +204,7 @@ func During[T any](r *Runner, fn func() (T, error)) (T, error) {
 
 // Stop tears the dashboard down and restores the previous sink. It is
 // idempotent, so a deferred Stop alongside an explicit one is safe.
-func (r *Runner) Stop() {
+func (r *progressRunner) Stop() {
 	if r == nil {
 		return
 	}

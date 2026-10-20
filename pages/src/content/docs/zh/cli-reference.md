@@ -286,9 +286,11 @@ Concurrent map access without a lock — wrap with sync.RWMutex.
 看板只在下列条件全部满足时才会启动，因此管道、CI 与脚本化使用都不受影响，
 也永远不会看到备用屏幕：
 
-- stdout 是终端（且 `TERM` 不是 `dumb`）
+- stdin 和 stdout 都是终端（且 `TERM` 不是 `dumb`）
 - `--format text`
 - `--audience human`
+
+小于 40x12 的终端会被提示放大，而不是显示一个放不下的画面。
 
 `--tui` 显式开启它。看板不自带信号处理器，因此在它之外到达的中断仍会交给本轮
 自身的信号处理；在看板*内部*按下的 `ctrl+c` 也会回到同一条正常关闭路径。
