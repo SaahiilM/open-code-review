@@ -887,33 +887,42 @@ func TestClipMarksTruncation(t *testing.T) {
 	}
 }
 
-// A row names the tool it is calling right now. When the call ends the name
-// has to go: leaving it there reads as though the row were still running that
-// tool, which is exactly what it is not doing.
-func TestRowClearsTheToolWhenTheCallEnds(t *testing.T) {
+// A row names the tool it called last. The name stays after the call ends —
+// clearing it left the row reading "starting…" while the activity log moved
+// on — and the row says whether the call is still in flight.
+func TestRowKeepsTheToolAfterTheCallEnds(t *testing.T) {
 	m := testModel(100, 30)
 	m = feed(m, progress.Event{Kind: progress.KindGroupStart, Group: "a.go", Paths: []string{"a.go"}})
 	m = feed(m, progress.Event{Kind: progress.KindToolStart, Group: "a.go", Detail: "file_read"})
 
 	if note := stripDashboardANSI(m.itemNote(m.lookup("a.go"))); !strings.Contains(note, "file_read") {
-		t.Fatalf("the row must name the tool it is calling, got %q", note)
+		t.Fatalf("the row must name the tool it called, got %q", note)
 	}
 
 	m = feed(m, progress.Event{Kind: progress.KindToolDone, Group: "a.go"})
-	if note := stripDashboardANSI(m.itemNote(m.lookup("a.go"))); strings.Contains(note, "file_read") {
-		t.Errorf("a finished call must not still be named, got %q", note)
+	note := stripDashboardANSI(m.itemNote(m.lookup("a.go")))
+	if !strings.Contains(note, "file_read") {
+		t.Errorf("a finished call must keep its name, got %q", note)
+	}
+	if m.lookup("a.go").toolRunning {
+		t.Error("a finished call must not be marked as running")
 	}
 }
 
-// A tool that failed is not running either, so the row drops its name.
-func TestRowClearsTheToolWhenTheCallFails(t *testing.T) {
+// A tool that failed is not running either, so the row stops marking it as
+// running — but keeps the name, which is still the last thing it did.
+func TestRowMarksAFailedCallAsNotRunning(t *testing.T) {
 	m := testModel(100, 30)
 	m = feed(m, progress.Event{Kind: progress.KindGroupStart, Group: "a.go", Paths: []string{"a.go"}})
 	m = feed(m, progress.Event{Kind: progress.KindToolStart, Group: "a.go", Detail: "file_read"})
 	m = feed(m, progress.Event{Kind: progress.KindToolError, Group: "a.go", Err: "permission denied"})
 
-	if note := stripDashboardANSI(m.itemNote(m.lookup("a.go"))); strings.Contains(note, "file_read") {
-		t.Errorf("a failed call must not still be named, got %q", note)
+	note := stripDashboardANSI(m.itemNote(m.lookup("a.go")))
+	if !strings.Contains(note, "file_read") {
+		t.Errorf("a failed call keeps the name of what it last did, got %q", note)
+	}
+	if m.lookup("a.go").toolRunning {
+		t.Error("a failed call must not be marked as running")
 	}
 }
 
@@ -960,5 +969,67 @@ func TestLogEntryIsOneRow(t *testing.T) {
 	}
 	if !strings.Contains(row, "first line second line") {
 		t.Errorf("the entry must keep its text, got %q", row)
+	}
+}
+
+// The frame takes exactly the height it was given. A frame that came out
+// taller pushed the help line off the bottom; one that came out shorter left
+// the terminal half empty and moved the log as work came and went.
+func TestViewFillsTheTerminalHeight(t *testing.T) {
+	for _, h := range []int{24, 30, 45, 60} {
+		m := testModel(120, h)
+		got := strings.Count(m.View().Content, "\n") + 1
+		if got != h {
+			t.Errorf("at height %d the frame is %d lines", h, got)
+		}
+	}
+}
+
+// A failure must be visible in the bar. A share small enough to round away
+// left the bar looking clean and finished while the count beside it said
+// files had failed.
+func TestBarAlwaysShowsAFailure(t *testing.T) {
+	m := testModel(120, 30)
+	m = feed(m,
+		progress.Event{Kind: progress.KindGroupStart, Group: "a.go", Paths: []string{"a.go"}},
+		progress.Event{Kind: progress.KindGroupDone, Group: "a.go", Files: 99},
+		progress.Event{Kind: progress.KindGroupFailed, Group: "b.go", Paths: []string{"b.go"}, Files: 1},
+	)
+	m.totalFiles = 100
+	m.doneFiles = 99
+	m.failedFiles = 1
+
+	reused, done, failed := m.barSegments(24)
+	if failed != 1 {
+		t.Errorf("a failure must take a cell of the bar, got %d", failed)
+	}
+	if reused != 0 {
+		t.Errorf("nothing was reused, got %d cells", reused)
+	}
+	if reused+done+failed != 24 {
+		t.Errorf("the bar must be full at the end of the run, got %d of 24 cells", reused+done+failed)
+	}
+}
+
+// The bar is stacked: the three segments end where the next one starts, so
+// they fill the width exactly. Measured separately and truncated, the bar came
+// out a cell short whenever the counts did not divide the width exactly, and
+// it never quite filled however far the run got.
+func TestBarSegmentsFillTheWidthExactly(t *testing.T) {
+	m := testModel(120, 30)
+	m.totalFiles = 100
+	for _, done := range []int{0, 1, 37, 50, 99, 100} {
+		m.doneFiles = done
+		m.failedFiles = 0
+		reused, gotDone, failed := m.barSegments(24)
+		if reused+gotDone+failed > 24 {
+			t.Errorf("at %d done the bar is %d cells, over the width", done, reused+gotDone+failed)
+		}
+	}
+	m.doneFiles = 100
+	m.failedFiles = 0
+	reused, done, failed := m.barSegments(24)
+	if reused+done+failed != 24 {
+		t.Errorf("a finished run must fill the bar, got %d of 24", reused+done+failed)
 	}
 }

@@ -5,6 +5,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -177,24 +178,7 @@ func (m dashboardModel) viewBarFill() string {
 		// its result, the second means it is doing the work. Reusing a
 		// monochrome fill made a resumed run look further along than the
 		// effort actually being spent.
-		// Each segment is measured against what is left of the bar, not
-		// against the whole of it. Measuring them all against the total lets
-		// them add up to more than the bar has whenever the counters do not
-		// divide the denominator exactly, and the bar then runs past the
-		// counter and the legend beside it.
-		part := func(n, used int) int {
-			c := int(float64(n) / float64(m.totalFiles) * float64(cells))
-			switch {
-			case c < 0:
-				c = 0
-			case c > cells-used:
-				c = cells - used
-			}
-			return c
-		}
-		reused := part(m.reusedFiles, 0)
-		done := part(m.doneFiles, reused)
-		failed := part(m.failedFiles, reused+done)
+		reused, done, failed := m.barSegments(cells)
 
 		body = m.paint(tuiReusedStyle, strings.Repeat("█", reused)) +
 			m.paint(tuiDoneStyle, strings.Repeat("█", done)) +
@@ -206,6 +190,58 @@ func (m dashboardModel) viewBarFill() string {
 		body = m.paint(tuiDimStyle, strings.Repeat("░", cells))
 	}
 	return m.paint(tuiDimStyle, "▕") + body + m.paint(tuiDimStyle, "▏")
+}
+
+// barSegments is how many cells of the bar each of its three segments gets.
+//
+// Each segment is measured against what is left of the bar, not against the
+// whole of it. Measuring them all against the total lets them add up to more
+// than the bar has whenever the counters do not divide the denominator
+// exactly, and the bar then runs past the counter and the legend beside it.
+//
+// A failure always gets a cell. A share small enough to round away left the
+// bar showing the run as finished and clean while the count beside it said
+// files had failed — the two disagreed, and the bar was the one hiding the
+// news.
+func (m dashboardModel) barSegments(cells int) (reused, done, failed int) {
+	if m.totalFiles <= 0 {
+		return 0, 0, 0
+	}
+	// The segments are measured by where they end rather than by how long
+	// each one is, so they stack without a gap between them. Measuring each
+	// one separately and truncating left the bar a cell short of full
+	// whenever the counts did not divide the width exactly — the bar never
+	// quite filled, however far the run got.
+	at := func(n int) int {
+		c := int(math.Round(float64(n) / float64(m.totalFiles) * float64(cells)))
+		switch {
+		case c < 0:
+			c = 0
+		case c > cells:
+			c = cells
+		}
+		return c
+	}
+	endReused := at(m.reusedFiles)
+	endDone := at(m.reusedFiles + m.doneFiles)
+	endFailed := at(m.reusedFiles + m.doneFiles + m.failedFiles)
+	reused = endReused
+	done = endDone - endReused
+	failed = endFailed - endDone
+	// A failure must be visible. A share small enough to round away left the
+	// bar showing the run as finished and clean while the count beside it
+	// said files had failed — the two disagreed, and the bar was the one
+	// hiding the news.
+	if m.failedFiles > 0 && failed == 0 {
+		switch {
+		case done > 0:
+			done--
+		case reused > 0:
+			reused--
+		}
+		failed = 1
+	}
+	return reused, done, failed
 }
 
 // viewBarLegend names the bar's segments. A bar in three colours is not
@@ -455,7 +491,14 @@ func (m dashboardModel) itemNote(it *dashboardItem) string {
 		if b.Len() > 0 {
 			b.WriteString(m.paint(tuiDimStyle, " · "))
 		}
-		b.WriteString(m.paint(tuiBusyStyle, it.tool))
+		// A call still in flight is bright; one that has finished keeps
+		// its name but is dim, because the name is the last thing the row
+		// did rather than what it is doing now.
+		style := tuiDimStyle
+		if it.toolRunning {
+			style = tuiBusyStyle
+		}
+		b.WriteString(m.paint(style, it.tool))
 	}
 	if b.Len() == 0 {
 		b.WriteString(m.paint(tuiDimStyle, "starting…"))
@@ -518,7 +561,61 @@ func (m dashboardModel) viewLog() string {
 	if len(rows) == 0 {
 		rows = append(rows, m.paint(tuiDimStyle, "  no activity yet"))
 	}
+	rows = m.withScrollbar(rows, start, end, avail)
 	return m.clamp(heading, rows, height)
+}
+
+// withScrollbar puts a scroll indicator down the right-hand edge of the log,
+// so the reader can see how much of the feed is left and where the window
+// sits in it.
+//
+// The bar is drawn in the last column of the region, so the entries give up
+// that column. A log that fits entirely gets a full-height thumb: there is
+// nothing to scroll, and the bar says so.
+func (m dashboardModel) withScrollbar(rows []string, start, end, avail int) []string {
+	if avail < 1 || m.width < 2 {
+		return rows
+	}
+	width := m.width - 1
+	bar := m.scrollbarColumn(start, end, avail)
+	for i := range rows {
+		rows[i] = pad(rows[i], width) + bar[i]
+	}
+	return rows
+}
+
+// scrollbarColumn draws the bar: a thumb whose height is the visible fraction
+// of the feed, sitting at the window's position in it.
+func (m dashboardModel) scrollbarColumn(start, end, avail int) []string {
+	total := len(m.log)
+	col := make([]string, avail)
+	for i := range col {
+		col[i] = m.paint(tuiDimStyle, "│")
+	}
+	if total <= avail {
+		// Everything fits, so the whole bar is the thumb.
+		for i := range col {
+			col[i] = m.paint(tuiDimStyle, "┃")
+		}
+		return col
+	}
+	thumb := avail * avail / total
+	if thumb < 1 {
+		thumb = 1
+	}
+	if thumb > avail {
+		thumb = avail
+	}
+	pos := 0
+	if total > avail {
+		pos = start * (avail - thumb) / (total - avail)
+	}
+	for i := 0; i < thumb; i++ {
+		if pos+i < avail {
+			col[pos+i] = m.paint(tuiBusyStyle, "┃")
+		}
+	}
+	return col
 }
 
 func (m dashboardModel) viewLogEntry(e dashboardLogEntry) string {
@@ -587,8 +684,18 @@ func (m dashboardModel) sectionHeading(name string, count int, hint string) stri
 // lines, so a long list can never push the keybindings off screen.
 func (m dashboardModel) clamp(heading string, rows []string, height int) string {
 	all := append([]string{heading}, rows...)
-	if height > 0 && len(all) > height {
-		all = all[:height]
+	if height > 0 {
+		if len(all) > height {
+			all = all[:height]
+		} else {
+			// Pad to the height the layout gave the pane. Without it a
+			// short pane pulled the regions below it up, so the frame ended
+			// short of the terminal and the log pane moved as work came
+			// and went.
+			for len(all) < height {
+				all = append(all, "")
+			}
+		}
 	}
 	return strings.Join(all, "\n")
 }
@@ -615,10 +722,18 @@ func (m dashboardModel) workHeight() int {
 	return rows + 1 // heading
 }
 
-// logHeight is whatever the work list did not take. workHeight counts its own
-// heading, so the subtraction below is against the body rows alone.
+// logHeight is whatever the work list did not take, its heading included.
+//
+// The flexible rows cover both panes and each pane spends one on its heading,
+// so the log's own heading has to come out of what the work list leaves. It
+// did not, and the frame came out one line taller than the terminal, which
+// pushed the help line off the bottom.
 func (m dashboardModel) logHeight() int {
-	return m.flexibleRows() - (m.workHeight() - 1)
+	h := m.flexibleRows() - (m.workHeight() - 1) - 1
+	if h < minLogRows+1 {
+		h = minLogRows + 1
+	}
+	return h
 }
 
 func (m dashboardModel) countRunning() int { return m.running }

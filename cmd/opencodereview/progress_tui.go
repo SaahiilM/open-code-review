@@ -47,15 +47,19 @@ const (
 // groups are in flight and what is each one doing" — one row per group answers
 // it, with the group's files behind it.
 type dashboardItem struct {
-	label    string
-	paths    []string
-	state    dashboardItemState
-	round    int
-	tool     string
-	started  time.Time
-	took     time.Duration
-	findings int
-	err      string
+	label string
+	paths []string
+	state dashboardItemState
+	round int
+	tool  string
+	// toolRunning says whether the tool named above is still in flight. The
+	// name stays after the call ends — it is the last thing the row did — and
+	// this is what tells a running call from a finished one.
+	toolRunning bool
+	started     time.Time
+	took        time.Duration
+	findings    int
+	err         string
 	// inputTokens and outputTokens are what this unit of work has spent,
 	// republished as cumulative totals after every LLM response so the row is
 	// live rather than final. They are kept apart because the header shows
@@ -412,21 +416,24 @@ func (m *dashboardModel) apply(ev progress.Event) {
 	case progress.KindToolStart:
 		if it := m.lookup(ev.Group); it != nil {
 			it.tool = ev.Detail
+			it.toolRunning = true
 		}
 
 	case progress.KindToolDone:
-		// The call is over, so the row is waiting on the model again.
-		// Leaving the name there would read as "it is calling this right
-		// now", which is exactly what it is not doing.
+		// The call is over, but the name stays: it is the last thing the
+		// row did, and clearing it left the row reading "starting…" while
+		// the activity log moved on. The flag says the call has finished, so
+		// the view can tell a running call from a finished one.
 		if it := m.lookup(ev.Group); it != nil {
-			it.tool = ""
+			it.toolRunning = false
 		}
 
 	case progress.KindToolError:
 		// A failed call is not running either, and the failure itself is
-		// already in the activity log.
+		// already in the activity log. The name stays: it is still the last
+		// thing the row did.
 		if it := m.lookup(ev.Group); it != nil {
-			it.tool = ""
+			it.toolRunning = false
 		}
 
 	case progress.KindReused:
