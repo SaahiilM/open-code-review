@@ -269,11 +269,14 @@
 
 {{/* Terminal-state rendering for the meta bar: classed by outcome, unclassed
      for unrecognized states. Invoked with .Session.Summary as dot. */}}
-{{/* Per-finding handoff into a coding agent. The context travels as
-     data-* attributes rather than a server-built link because every vendor
-     uses a different parameter name for the prompt (q / prompt / text) and
-     each truncates at a different length; agent.js owns that mapping so the
-     fix belongs in one place.
+{{/* Per-finding handoff into a coding agent. The prompt is built in
+     agent.js rather than here, because every vendor uses a different
+     parameter name for it (q / prompt / text) and each truncates at a
+     different length; that mapping belongs in one place.
+
+     The finding's text is read from the rendered card instead of being
+     repeated here, so a session with hundreds of findings does not carry
+     every code block twice.
 
      The menu is ordered app -> CLI -> extension per vendor. No vendor
      documents a prefilled-prompt scheme for its CLI, so "Copy prompt for
