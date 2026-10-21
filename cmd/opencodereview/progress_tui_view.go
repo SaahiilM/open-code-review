@@ -419,17 +419,29 @@ func (m dashboardModel) viewWork() string {
 	}
 
 	if m.showCompleted {
-		rows = append(rows, m.sectionHeading("completed", len(done), ""))
+		rows = append(rows, m.sectionHeading("finished", len(done), ""))
 		for _, it := range done {
 			rows = append(rows, m.viewItem(it, frame, col)...)
 		}
 	}
 
-	hint := fmt.Sprintf("%d running", m.countRunning())
-	if len(done) > 0 && !m.showCompleted {
-		hint = fmt.Sprintf("%d running · %d done (c)", m.countRunning(), len(done))
+	// The heading counts what is being worked on right now, not every row the
+	// run has ever opened. The old count was the running total, so a heading
+	// reading "work (51)" sat next to a status row saying four files were in
+	// flight, and the two were about different things: the reader took the
+	// heading for the files being worked on, and it was the files already
+	// behind them.
+	//
+	// The folded rows are called finished rather than done, because some of
+	// them failed and the status row's counters say so.
+	hint := ""
+	if len(done) > 0 {
+		hint = fmt.Sprintf("%d finished", len(done))
+		if !m.showCompleted {
+			hint += " (c)"
+		}
 	}
-	heading := m.sectionHeading("work", len(m.items), hint)
+	heading := m.sectionHeading("work", m.countRunning(), hint)
 	if m.focus == dashboardPaneWork {
 		// Mark the pane the arrows are driving, so a key press is never a
 		// guess about which list just moved.
@@ -789,7 +801,7 @@ func (m dashboardModel) helpKeys() []string {
 		"q detach",
 		"tab pane",
 		"↑↓ " + m.focusName(),
-		"c completed",
+		"c finished",
 		"l " + m.logKeyName(),
 		"p pause log",
 		"ctrl+c cancel",

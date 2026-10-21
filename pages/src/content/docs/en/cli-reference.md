@@ -283,17 +283,17 @@ ocr review  …ev/open-code-review   anthropic/claude-opus-4-6 [▲3.8M ▼412k]
 reviewing ▕████████████░░░░░░░░▏ 292/487  ▇ reused ▇ done ▇ failed
 143 findings · 1 in flight · 240 reused · 12 failed · 272 skipped · session 3ee6cd77-…
 plan est 3.0M in + 527k out ≈ 3.5M total
-work (17)                                     4 running · 13 done (c)
+work (4)                                       13 finished (c)
   ⣾ internal/agent/agent.go       round 2 · file_read "internal/agen… · ▲93.2k ▼8.1k
   ⣾ internal/scan/agent.go        round 1 · code_search "budget" · ▲41k
-completed (13)
+finished (13)
   ✓ pages/src/content/docs/en/cli-ref.md   2 findings · 4.1s · ▲196k ▼18k
   ✗ internal/llm/resolver.go               context deadline exceeded · 18k
 activity (214)                                              following
   01:10:02  ▶ file_read "internal/agent/agent.go"
   01:10:04  ✔ file_read (12ms)
   01:10:05  ✘ code_search failed: context deadline exceeded
-q detach  ·  tab pane  ·  ↑↓ work  ·  c completed  ·  l hide log  ·  p pause log  ·  ctrl+c cancel
+q detach  ·  tab pane  ·  ↑↓ work  ·  c finished  ·  l hide log  ·  p pause log  ·  ctrl+c cancel
 ```
 
 The plan line carries the run's estimated cost — what the run is expected to
@@ -339,7 +339,7 @@ terminal, keeping the tail, which is the identifying end.
 | `q` / `esc` | Detach the dashboard. The review keeps running; progress reverts to plain `[ocr]` lines and the report is written as usual. |
 | `tab` / `shift+tab` | Switch which pane the arrow keys drive, between the work list and the activity log. The focused pane is highlighted, and the help line names it. |
 | `↑` / `k`, `↓` / `j` | Scroll the focused pane. `u` snaps back to the newest entry and starts following again. |
-| `c` | Expand or collapse the finished rows. They are folded away by default, because a long scan finishes hundreds of files and the running ones are what you are watching; the work heading shows `N done (c)` while they are hidden. |
+| `c` | Expand or collapse the finished rows. They are folded away by default, because a long scan finishes hundreds of files and the running ones are what you are watching; the work heading shows `N finished (c)` while they are hidden. |
 | `l` | Expand or collapse the activity log. Folded away, the work list takes the height the two of them shared and the log keeps a line saying how many entries it holds and how to bring it back. |
 | `ctrl+c` | Cancel the run. The dashboard hands the request back to the pipeline, so it goes through the same graceful shutdown as an interrupt: the report is flushed, the retry report frozen, the manifest persisted, and MCP clients closed. The view stays up until that finishes. |
 

@@ -1187,6 +1187,31 @@ func TestTheLogCanBeFoldedAway(t *testing.T) {
 
 // A row says which batch it belongs to, so a reader can tell where in the
 // scan the work stands.
+// The work heading counts what is being worked on now. It used to count every
+// row the run had ever opened, which sat next to a status row saying how many
+// files were in flight and read as a count of the files behind them.
+func TestTheWorkHeadingCountsWhatIsBeingWorkedOn(t *testing.T) {
+	m := testModel(120, 30)
+	m = feed(m,
+		progress.Event{Kind: progress.KindGroupStart, Group: "a.go", Paths: []string{"a.go"}},
+		progress.Event{Kind: progress.KindGroupStart, Group: "b.go", Paths: []string{"b.go"}},
+		progress.Event{Kind: progress.KindGroupDone, Group: "a.go", Files: 1},
+		progress.Event{Kind: progress.KindGroupFailed, Group: "b.go", Files: 1},
+	)
+	m = feed(m, progress.Event{Kind: progress.KindGroupStart, Group: "c.go", Paths: []string{"c.go"}})
+
+	heading := stripDashboardANSI(strings.Split(m.viewWork(), "\n")[0])
+	if !strings.Contains(heading, "work (1)") {
+		t.Errorf("the heading must count the file being worked on, got %q", heading)
+	}
+	if strings.Contains(heading, "work (3)") {
+		t.Errorf("the heading must not count the rows already finished, got %q", heading)
+	}
+	if !strings.Contains(heading, "2 finished") {
+		t.Errorf("the heading must say how many are finished, got %q", heading)
+	}
+}
+
 func TestARowSaysWhichBatchItIs(t *testing.T) {
 	m := testModel(120, 30)
 	m = feed(m, progress.Event{
