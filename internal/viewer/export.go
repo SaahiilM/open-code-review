@@ -59,9 +59,11 @@ func ExportSession(out io.Writer, root, encodedRepo, sessionID string) error {
 	if err != nil {
 		return fmt.Errorf("read embedded agent script: %w", err)
 	}
+	// The order has to match the served page's template, so the exported page
+	// and the served one run the same scripts in the same sequence.
 	js := append(append(append([]byte(nil), a11y...), '\n'), pagerJS...)
-	js = append(append(js, '\n'), sessionJS...)
 	js = append(append(js, '\n'), agentJS...)
+	js = append(append(js, '\n'), sessionJS...)
 
 	tmpl, err := parseTemplate("session.html")
 	if err != nil {
