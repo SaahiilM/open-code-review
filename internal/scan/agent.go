@@ -108,6 +108,20 @@ type Agent struct {
 	scanFingerprints map[string]string
 	projectSummary   string      // populated post-run by maybeRunProjectSummary
 	budgetExceeded   atomic.Bool // set when the aggregate token budget stops dispatch or an in-flight task
+	// strategy and batches are how the work is split. They are worked out
+	// once, before the estimate is published, so the dashboard is told about
+	// the plan before the first batch starts and the two cannot disagree.
+	strategy BatchStrategy
+	batches  [][]model.ScanItem
+}
+
+// planBatches is how the work is split and the policy that split it.
+func (a *Agent) planBatches() (BatchStrategy, [][]model.ScanItem) {
+	if a.batches == nil {
+		a.strategy = a.resolveBatchStrategy()
+		a.batches = groupBatches(a.items, a.strategy, a.args.Template.BatchSize)
+	}
+	return a.strategy, a.batches
 }
 
 // ProjectSummary returns the markdown project-level summary produced after
@@ -339,7 +353,12 @@ func (a *Agent) Run(ctx context.Context) ([]model.LlmComment, error) {
 	reviewable := len(a.items)
 	progress.Noticef("full-scan: %d file(s) discovered, reviewing %d in %s\n",
 		totalDiscovered, reviewable, a.args.RepoDir)
-	publishPlanned(reviewable)
+	// The estimate and the batch plan are computed before the denominator is
+	// published so the dashboard can show both from the first frame, rather
+	// than the estimate arriving as a line the reader has to find in the log.
+	est := estimateCost(a.items, a.planEnabled(), a.dedupEnabled(), a.summaryEnabled())
+	strategy, batches := a.planBatches()
+	publishPlanned(reviewable, est, string(strategy), len(batches))
 
 	if reviewable == 0 {
 		progress.Notice("No reviewable files. Skipping scan.\n")
@@ -354,7 +373,6 @@ func (a *Agent) Run(ctx context.Context) ([]model.LlmComment, error) {
 	}
 
 	// Pre-run cost projection so users aren't surprised by a large scan.
-	est := estimateCost(a.items, a.planEnabled(), a.dedupEnabled(), a.summaryEnabled())
 	progress.Noticef("estimated cost: %s\n", est)
 	if a.args.MaxTokensBudget > 0 {
 		progress.Noticef("token budget: %s (dispatch stops once exceeded)\n", humanTokens(a.args.MaxTokensBudget))
@@ -566,8 +584,7 @@ func (a *Agent) dispatchSubtasks(ctx context.Context) ([]model.LlmComment, error
 	a.initScanFingerprints(a.items)
 	a.initResumeInfo(a.items)
 
-	strategy := a.resolveBatchStrategy()
-	batches := groupBatches(a.items, strategy, a.args.Template.BatchSize)
+	strategy, batches := a.planBatches()
 	progress.Noticef("scan dispatch: %d batch(es) by %s strategy\n", len(batches), strategy)
 
 	var dispatched, reused int64
@@ -580,7 +597,7 @@ func (a *Agent) dispatchSubtasks(ctx context.Context) ([]model.LlmComment, error
 		// batch and feed them into the per-batch dedup hook.
 		batchStart := a.args.CommentCollector.Snapshot()
 
-		n, budgetHit, checkpoints, err := a.dispatchBatch(ctx, bi, batch)
+		n, budgetHit, checkpoints, err := a.dispatchBatch(ctx, bi, batchLabel(strategy, bi, len(batches)), batch)
 		dispatched += n
 		for _, checkpoint := range checkpoints {
 			if checkpoint.reused {
@@ -689,7 +706,7 @@ func (a *Agent) resolveBatchStrategy() BatchStrategy {
 // budget, the file (and all remaining files in the batch) are skipped.
 // This keeps overrun bounded by roughly one in-flight file per worker,
 // instead of a whole batch as the coarse batch-level gate did.
-func (a *Agent) dispatchBatch(ctx context.Context, batchIdx int, batch []model.ScanItem) (int64, bool, []batchCheckpoint, error) {
+func (a *Agent) dispatchBatch(ctx context.Context, batchIdx int, label string, batch []model.ScanItem) (int64, bool, []batchCheckpoint, error) {
 	concurrency := a.args.MaxConcurrency
 	if concurrency <= 0 {
 		concurrency = 8
@@ -749,7 +766,7 @@ func (a *Agent) dispatchBatch(ctx context.Context, batchIdx int, batch []model.S
 		}
 
 		dispatched++
-		publishItemStart(it)
+		publishItemStart(it, label)
 		wg.Add(1)
 		go func(it model.ScanItem, fingerprint string) {
 			defer wg.Done()

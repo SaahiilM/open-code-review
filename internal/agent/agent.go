@@ -327,7 +327,13 @@ func (a *Agent) Run(ctx context.Context) ([]model.LlmComment, error) {
 	totalChanged := len(a.diffs)
 	reviewCount := counts.Selected
 	progress.Noticef("%d file(s) changed, reviewing %d in %s\n", totalChanged, reviewCount, a.args.RepoDir)
-	publishPlanned(reviewCount)
+	// The estimate is over the selected set, not the changed one: a file that
+	// selection dropped is never reviewed and never costs anything. It is
+	// computed here rather than at the budget check so the dashboard can show
+	// it for the whole run, and reused there so the projection is only ever
+	// made once.
+	est := estimateDiffCost(kept)
+	publishPlanned(reviewCount, est)
 
 	a.logExclusions(decisions)
 	a.diffs = kept
@@ -395,7 +401,6 @@ func (a *Agent) Run(ctx context.Context) ([]model.LlmComment, error) {
 	// projected cost against their cap). Keeps the prior text-mode output
 	// unchanged for the common unlimited path.
 	if a.args.MaxTokensBudget > 0 {
-		est := estimateDiffCost(a.diffs)
 		progress.Noticef("estimated cost: %s\n", est)
 		progress.Noticef("token budget: %s (dispatch stops once exceeded)\n", humanTokens(a.args.MaxTokensBudget))
 		if est.TotalTokens > a.args.MaxTokensBudget {

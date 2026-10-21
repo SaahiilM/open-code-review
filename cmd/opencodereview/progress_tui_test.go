@@ -568,9 +568,31 @@ func TestShortenPathHandlesDegenerateWidths(t *testing.T) {
 }
 
 // logBody is the log pane's rows, without the heading.
+//
+// The scrollbar column is dropped as well: it says how much of the feed is
+// left, which changes when the feed grows even while the window is held, and
+// the question this answers is whether the text the reader is looking at
+// moved.
 func logBody(m dashboardModel) string {
 	lines := strings.Split(stripDashboardANSI(m.viewLog()), "\n")
-	return strings.Join(lines[1:], "\n")
+	rows := make([]string, 0, len(lines)-1)
+	for _, l := range lines[1:] {
+		rows = append(rows, trimScrollbarColumn(l))
+	}
+	return strings.Join(rows, "\n")
+}
+
+// trimScrollbarColumn drops the scrollbar glyph from the end of a row.
+func trimScrollbarColumn(s string) string {
+	r := []rune(s)
+	if len(r) == 0 {
+		return s
+	}
+	switch r[len(r)-1] {
+	case '┃', '│':
+		return string(r[:len(r)-1])
+	}
+	return s
 }
 
 func TestPauseFreezesTheLogWindow(t *testing.T) {
@@ -870,8 +892,11 @@ func TestDashboardRefusesATooSmallTerminal(t *testing.T) {
 		Update(tea.WindowSizeMsg{Width: 20, Height: 8})
 	m := upd.(dashboardModel)
 	got := stripDashboardANSI(m.View().Content)
-	if !strings.Contains(got, "Terminal too small") {
+	if !strings.Contains(got, "too small") {
 		t.Errorf("a terminal below the floor must be told to enlarge, got %q", got)
+	}
+	if !strings.Contains(got, "ctrl+c to stop") {
+		t.Errorf("a terminal below the floor must say how to stop, got %q", got)
 	}
 }
 
@@ -956,19 +981,19 @@ func TestBarSegmentsNeverOverflowTheBar(t *testing.T) {
 	}
 }
 
-// One log entry is one row. An entry whose text spans lines would render as
-// two, and the region counts entries rather than lines, so the rows below it
-// would be pushed off the frame.
-func TestLogEntryIsOneRow(t *testing.T) {
+// One log entry is one message. An entry whose text spans lines is folded
+// into one first, and the frame then lays it out over as many lines as it
+// needs to show the whole thing.
+func TestLogEntryFoldsItsText(t *testing.T) {
 	m := testModel(80, 24)
 	m = feed(m, progress.Event{Kind: progress.KindNotice, Text: "first line\nsecond line\n"})
 
-	row := m.viewLogEntry(m.log[0])
-	if strings.Contains(row, "\n") {
-		t.Errorf("a log entry must not span lines, got %q", row)
+	joined := strings.Join(m.wrapLogEntry(m.log[0]), " ")
+	if strings.Contains(joined, "first line\nsecond line") {
+		t.Errorf("a log entry must fold its text onto one line, got %q", joined)
 	}
-	if !strings.Contains(row, "first line second line") {
-		t.Errorf("the entry must keep its text, got %q", row)
+	if !strings.Contains(joined, "first line second line") {
+		t.Errorf("the entry must keep its text, got %q", joined)
 	}
 }
 
@@ -1031,5 +1056,148 @@ func TestBarSegmentsFillTheWidthExactly(t *testing.T) {
 	reused, done, failed := m.barSegments(24)
 	if reused+done+failed != 24 {
 		t.Errorf("a finished run must fill the bar, got %d of 24", reused+done+failed)
+	}
+}
+
+// The estimate has to stay on screen. The log says it once, and the estimate
+// is the fact a reader keeps in view while the run spends it: the header
+// carries what has been spent so far, and the plan line carries what the run
+// is expected to spend.
+func TestPlanLineCarriesTheEstimate(t *testing.T) {
+	m := testModel(120, 30)
+	m = feed(m, progress.Event{
+		Kind:  progress.KindPlanned,
+		Files: 98,
+		Plan: &progress.Plan{
+			InputTokens:  3_000_000,
+			OutputTokens: 527_000,
+			Strategy:     "by-language",
+			Groups:       5,
+		},
+	})
+
+	line := stripDashboardANSI(m.viewPlan())
+	for _, want := range []string{"3M", "527k", "3.5M", "by language", "5 batches"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("the plan line must carry %q, got %q", want, line)
+		}
+	}
+	if !strings.Contains(m.View().Content, "3.5M") {
+		t.Error("the estimate must be in the frame, not only in the log")
+	}
+}
+
+// A run that does not group its work has no plan to show beyond the cost, so
+// the line must not claim it has batches.
+func TestPlanLineWithoutBatches(t *testing.T) {
+	m := testModel(120, 30)
+	m = feed(m, progress.Event{
+		Kind:  progress.KindPlanned,
+		Files: 4,
+		Plan:  &progress.Plan{InputTokens: 1000, OutputTokens: 200},
+	})
+
+	line := stripDashboardANSI(m.viewPlan())
+	if strings.Contains(line, "batch") {
+		t.Errorf("a run with no batches must not claim any, got %q", line)
+	}
+}
+
+// A row that does not fit is wrapped, not cut. A truncated note says nothing,
+// and the note is the part of the row that says what is happening.
+func TestARowWrapsInsteadOfBeingCut(t *testing.T) {
+	m := testModel(80, 30)
+	m = feed(m, progress.Event{
+		Kind:  progress.KindGroupStart,
+		Group: "a.go",
+		Paths: []string{"a.go"},
+	})
+	m = feed(m, progress.Event{Kind: progress.KindToolStart, Group: "a.go",
+		Detail: "file_read src/app/index.css with an argument long enough to run past the note column"})
+
+	rows := m.viewItem(m.lookup("a.go"), " ", m.nameWidth(m.items))
+	if len(rows) < 2 {
+		t.Fatalf("a note that does not fit must wrap onto a second line, got %d line(s)", len(rows))
+	}
+	joined := stripDashboardANSI(strings.Join(rows, " "))
+	if !strings.Contains(joined, "src/app/index.css") {
+		t.Errorf("the whole note must be shown, got %q", joined)
+	}
+	for i, r := range rows {
+		if w := lipgloss.Width(r); w > m.width {
+			t.Errorf("row %d is %d cells wide, over the frame", i, w)
+		}
+	}
+}
+
+// The frame's height is fixed, and a wrapped row takes more than one line, so
+// the work region has to give up a row rather than push the help line off the
+// bottom of the screen.
+func TestAWrappedRowDoesNotOverflowTheFrame(t *testing.T) {
+	for _, h := range []int{24, 30, 45} {
+		m := testModel(80, h)
+		m = feed(m, progress.Event{
+			Kind:  progress.KindGroupStart,
+			Group: "a.go",
+			Paths: []string{"a.go"},
+		})
+		m = feed(m, progress.Event{Kind: progress.KindToolStart, Group: "a.go", Detail: "file_read src/app/index.css"})
+		got := strings.Count(m.View().Content, "\n") + 1
+		if got != h {
+			t.Errorf("at height %d the frame is %d lines", h, got)
+		}
+	}
+}
+
+// The feed can be folded away, and the work list takes the height it was
+// using. The frame still has to fit.
+func TestTheLogCanBeFoldedAway(t *testing.T) {
+	m := testModel(100, 30)
+	m = feed(m,
+		progress.Event{Kind: progress.KindGroupStart, Group: "a.go", Paths: []string{"a.go"}},
+		progress.Event{Kind: progress.KindNotice, Text: "something happened\n"},
+	)
+
+	before := m.workHeight()
+	upd, _ := m.Update(tea.KeyPressMsg{Code: 'l', Text: "l"})
+	m = upd.(dashboardModel)
+	if m.showLog {
+		t.Fatal("l must fold the feed away")
+	}
+	if m.workHeight() <= before {
+		t.Errorf("the work list must take the feed's height: %d rows, was %d", m.workHeight(), before)
+	}
+	if got := strings.Count(m.View().Content, "\n") + 1; got != 30 {
+		t.Errorf("the frame is %d lines, want 30", got)
+	}
+	if !strings.Contains(m.View().Content, "press l to expand") {
+		t.Error("the folded feed must say how to bring it back")
+	}
+
+	// And it comes back as it was.
+	upd, _ = m.Update(tea.KeyPressMsg{Code: 'l', Text: "l"})
+	m = upd.(dashboardModel)
+	if !m.showLog {
+		t.Fatal("l must bring the feed back")
+	}
+	if got := strings.Count(m.View().Content, "\n") + 1; got != 30 {
+		t.Errorf("the frame is %d lines, want 30", got)
+	}
+}
+
+// A row says which batch it belongs to, so a reader can tell where in the
+// scan the work stands.
+func TestARowSaysWhichBatchItIs(t *testing.T) {
+	m := testModel(120, 30)
+	m = feed(m, progress.Event{
+		Kind:  progress.KindGroupStart,
+		Group: "a.go",
+		Paths: []string{"a.go"},
+		Plan:  &progress.Plan{Batch: "2 of 5"},
+	})
+
+	row := stripDashboardANSI(strings.Join(m.viewItem(m.lookup("a.go"), " ", m.nameWidth(m.items)), " "))
+	if !strings.Contains(row, "batch 2 of 5") {
+		t.Errorf("the row must name its batch, got %q", row)
 	}
 }

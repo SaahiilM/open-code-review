@@ -18,11 +18,23 @@ import (
 // it is what lets a `▶ file_read` line be attributed to the row that caused
 // it.
 
-// publishPlanned reports the run's coverage denominator. It is published once
-// selection has settled, before any dispatch, so the dashboard's bar starts at
-// a real total rather than growing out of an unknown one.
-func publishPlanned(files int) {
-	progress.Publish(progress.Event{Kind: progress.KindPlanned, Files: files})
+// publishPlanned reports the run's coverage denominator and its cost estimate.
+// It is published once selection has settled, before any dispatch, so the
+// dashboard's bar starts at a real total rather than growing out of an unknown
+// one, and the estimate is on screen for the whole run rather than scrolling
+// away in the log.
+//
+// A review does not group its work into batches, so it publishes no strategy
+// and no group count.
+func publishPlanned(files int, est Estimate) {
+	progress.Publish(progress.Event{
+		Kind:  progress.KindPlanned,
+		Files: files,
+		Plan: &progress.Plan{
+			InputTokens:  est.InputTokens,
+			OutputTokens: est.OutputTokens,
+		},
+	})
 }
 
 // publishGroupStart announces a group entering the concurrent work pool.

@@ -20,6 +20,7 @@ import (
 //
 //	header   what is being reviewed, on what, for how long
 //	bar      overall file progress plus the counters worth watching
+//	plan     what the run is estimated to cost, and how the work is grouped
 //	work     one row per unit of concurrent work, live
 //	log      the scrolling activity feed
 //	help     the keybindings
@@ -30,8 +31,8 @@ import (
 
 const (
 	// fixedRows are the regions whose height does not vary: header, bar,
-	// stats, a blank separator, and the help line.
-	fixedRows = 5
+	// stats, plan, a blank separator, and the help line.
+	fixedRows = 6
 
 	// minWorkRows and minLogRows are the floors for the two flexible regions.
 	// Below these a run would show headers and nothing else, which is worse
@@ -43,19 +44,33 @@ const (
 	// log off the screen entirely.
 	maxWorkRows = 12
 
+	// minNoteWidth is how much room the note column gets before the name
+	// column starts giving ground. The note is the part of a row that says
+	// what is happening, so a long path may not squeeze it out.
+	minNoteWidth = 24
+
+	// minNameWidth and maxNameWidth bound the name column.
+	minNameWidth = 16
+	maxNameWidth = 60
+
 	// minFrameWidth and minFrameHeight are the floor for the reported window.
 	// Every region clips itself to the frame width, so a zero would blank the
 	// dashboard instead of just looking cramped. A terminal below the floor
 	// gets the too-small message rather than a frame that does not fit.
+	//
+	// The height is the layout's own minimum: the fixed rows, each region's
+	// heading, and the floors for the two flexible regions. A frame that
+	// cannot fit is worse than one that is not drawn at all.
 	minFrameWidth  = 40
-	minFrameHeight = 12
+	minFrameHeight = fixedRows + minWorkRows + minLogRows + 2
 )
 
 // tooSmallMessage is what a terminal too small for the dashboard is told
 // instead of being shown a frame that would not fit. It is derived from the
-// floor so it cannot drift from it.
+// floor so it cannot drift from it, and it is two short lines so that it
+// fits the narrowest terminal the dashboard would otherwise have drawn.
 var tooSmallMessage = fmt.Sprintf(
-	"Terminal too small for the dashboard — enlarge it to at least %dx%d, or press Ctrl+C to stop.",
+	"too small: the dashboard needs %dx%d\nctrl+c to stop",
 	minFrameWidth, minFrameHeight)
 
 // The dashboard shares the palette provider_tui.go declares for the config
@@ -97,6 +112,7 @@ func (m dashboardModel) View() tea.View {
 	regions := []string{
 		m.viewHeader(),
 		m.viewBar(),
+		m.viewPlan(),
 		"",
 		m.viewWork(),
 		m.viewLog(),
@@ -159,6 +175,36 @@ func (m dashboardModel) viewBar() string {
 		m.viewBarLegend(),
 	)
 	return lipgloss.JoinVertical(lipgloss.Left, clip(row, m.width), m.viewStats())
+}
+
+// viewPlan is the run's shape: what it is estimated to cost, and how the work
+// is grouped.
+//
+// It stays on screen for the whole run. The log says the same thing once, and
+// the estimate is exactly the fact a reader wants to keep in view while the
+// run spends it — the header carries what has been spent so far, and this
+// carries what the run is expected to spend.
+func (m dashboardModel) viewPlan() string {
+	if m.estInput == 0 && m.estOutput == 0 {
+		return ""
+	}
+	parts := []string{
+		m.paint(tuiSectionStyle, "plan"),
+		m.paint(tuiDimStyle, " est "),
+		m.paint(tuiBusyStyle, humanTokens(m.estInput)),
+		m.paint(tuiDimStyle, " in + "),
+		m.paint(tuiWarnStyle, humanTokens(m.estOutput)),
+		m.paint(tuiDimStyle, " out ≈ "),
+		m.paint(tuiDimStyle, humanTokens(m.estInput+m.estOutput)),
+		m.paint(tuiDimStyle, " total"),
+	}
+	if m.strategy != "" && m.groups > 0 {
+		parts = append(parts,
+			m.paint(tuiDimStyle, " · "),
+			m.paint(tuiDimStyle, fmt.Sprintf("%d batches · %s", m.groups, strings.ReplaceAll(m.strategy, "-", " "))),
+		)
+	}
+	return clip(strings.Join(parts, ""), m.width)
 }
 
 // viewBarFill draws the progress bar itself.
@@ -353,9 +399,14 @@ func (m dashboardModel) viewWork() string {
 	running, done := m.splitItems()
 	rows := make([]string, 0, len(running)+len(done)+2)
 
+	// The name column is shared by every row, so it is measured over the
+	// whole run rather than over the rows on screen: a column that follows
+	// the visible rows would move every note sideways as rows came and went.
+	col := m.nameWidth(m.items)
+
 	frame := m.spinner.View()
 	for _, it := range running {
-		rows = append(rows, m.viewItem(it, frame))
+		rows = append(rows, m.viewItem(it, frame, col)...)
 	}
 	if len(running) == 0 {
 		rows = append(rows, m.paint(tuiDimStyle, "  waiting for work…"))
@@ -363,14 +414,14 @@ func (m dashboardModel) viewWork() string {
 
 	// The running list scrolls independently: a wide review can have more
 	// groups in flight than the region has rows.
-	if len(running) > m.workBodyRows() {
+	if len(rows) > m.workBodyRows() {
 		rows = m.scrollWindow(rows, m.workTop)
 	}
 
 	if m.showCompleted {
 		rows = append(rows, m.sectionHeading("completed", len(done), ""))
 		for _, it := range done {
-			rows = append(rows, m.viewItem(it, frame))
+			rows = append(rows, m.viewItem(it, frame, col)...)
 		}
 	}
 
@@ -423,9 +474,13 @@ func (m dashboardModel) workBodyRows() int {
 	return rows
 }
 
-// scrollWindow shows a window of rows at offset, marking that more exist in
+// scrollWindow shows a window of lines at offset, marking that more exist in
 // each direction so a partially visible list is never mistaken for a whole
 // one.
+//
+// The markers are lines of their own. Sharing the last line with a row made
+// the frame wider than the terminal, and the terminal wrapped it onto a
+// second line, which pushed the help line off the bottom of the screen.
 func (m dashboardModel) scrollWindow(rows []string, top int) []string {
 	height := m.workBodyRows()
 	if len(rows) <= height {
@@ -443,31 +498,80 @@ func (m dashboardModel) scrollWindow(rows []string, top int) []string {
 		window = window[:height]
 	}
 	if top+height < len(rows) {
-		window[len(window)-1] += m.paint(tuiDimStyle, fmt.Sprintf(" ↓%d more", len(rows)-top-height))
+		window = window[:height-1]
+		window = append(window, m.paint(tuiDimStyle, fmt.Sprintf("  ↓%d more", len(rows)-top-height)))
 	}
 	return window
 }
 
-func (m dashboardModel) viewItem(it *dashboardItem, frame string) string {
-	var icon, name, note string
+// viewItem renders one work row.
+//
+// A row that fits the frame is one line: the icon in a fixed column, the name
+// in a fixed column, and the note after it, so a dozen simultaneous rows line
+// up and can be scanned. A note that does not fit continues on the next
+// lines rather than being cut off — a truncated note says nothing, and the
+// note is the part of the row that says what is happening.
+func (m dashboardModel) viewItem(it *dashboardItem, frame string, col int) []string {
+	var icon, plain, note string
+	var style lipgloss.Style
 	switch it.state {
 	case dashboardStateRunning:
 		icon = frame
-		name = m.paint(tuiTitleStyle, it.display())
+		style = tuiTitleStyle
+		plain = it.display()
 		note = m.itemNote(it)
 	case dashboardStateDone:
 		icon = m.paint(tuiOKStyle, "✓")
-		name = m.paint(tuiDimStyle, it.display())
+		style = tuiDimStyle
+		plain = it.display()
 		note = m.paint(tuiDimStyle, m.costLine(it))
 	case dashboardStateFailed:
 		icon = m.paint(tuiErrorStyle, "✗")
-		name = m.paint(tuiErrorStyle, it.display())
+		style = tuiErrorStyle
+		plain = it.display()
 		note = m.paint(tuiErrorStyle, it.err)
 	}
+	// The tail of a path is what identifies the file, so a name that does not
+	// fit its column is shortened from the front rather than cut off at the
+	// end.
+	if lipgloss.Width(plain) > col {
+		plain = shortenPath(plain, col)
+	}
+	name := m.paint(style, plain)
+
 	// A fixed icon column and a fixed name column are what make a dozen
 	// simultaneous rows scannable rather than a ragged mess.
-	row := "  " + pad(icon, 2) + " " + pad(name, m.nameWidth()) + " " + note
-	return clip(row, m.width)
+	head := "  " + pad(icon, 2) + " " + pad(name, col) + " "
+	lines := wrapNote(note, m.width-lipgloss.Width(head), lipgloss.Width(head))
+	if len(lines) == 0 {
+		return []string{clip(head, m.width)}
+	}
+	out := make([]string, 0, len(lines))
+	out = append(out, head+lines[0])
+	out = append(out, lines[1:]...)
+	return out
+}
+
+// wrapNote lays a row's note out under the row's own columns: a note that
+// fits is one line, and a note that does not continues on the next lines,
+// each indented to the note's column so the rows still line up.
+func wrapNote(note string, width, indent int) []string {
+	if note == "" {
+		return nil
+	}
+	if width < 8 {
+		width = 8
+	}
+	wrapped := strings.Split(lipgloss.Wrap(note, width, ""), "\n")
+	out := make([]string, 0, len(wrapped))
+	for i, l := range wrapped {
+		if i == 0 {
+			out = append(out, l)
+			continue
+		}
+		out = append(out, strings.Repeat(" ", indent)+l)
+	}
+	return out
 }
 
 // costLine is the right-hand column of a finished row: what it found, how long
@@ -482,12 +586,23 @@ func (m dashboardModel) costLine(it *dashboardItem) string {
 // agent is doing right now, and what it has spent so far.
 func (m dashboardModel) itemNote(it *dashboardItem) string {
 	var b strings.Builder
+	// The batch comes first: it frames the rest of the row, saying which
+	// part of the run this work belongs to.
+	if it.batch != "" {
+		b.WriteString(m.paint(tuiDimStyle, "batch "+it.batch))
+	}
 	// Rounds are published starting at 1, so a non-zero round is what
 	// distinguishes "in a round" from "still starting".
+	doing := false
 	if it.round > 0 {
+		doing = true
+		if b.Len() > 0 {
+			b.WriteString(m.paint(tuiDimStyle, " · "))
+		}
 		b.WriteString(m.paint(tuiDimStyle, fmt.Sprintf("round %d", it.round)))
 	}
 	if it.tool != "" {
+		doing = true
 		if b.Len() > 0 {
 			b.WriteString(m.paint(tuiDimStyle, " · "))
 		}
@@ -500,7 +615,10 @@ func (m dashboardModel) itemNote(it *dashboardItem) string {
 		}
 		b.WriteString(m.paint(style, it.tool))
 	}
-	if b.Len() == 0 {
+	if !doing {
+		if b.Len() > 0 {
+			b.WriteString(m.paint(tuiDimStyle, " · "))
+		}
 		b.WriteString(m.paint(tuiDimStyle, "starting…"))
 	}
 	// Spend so far, kept last so the round and the current tool — the parts
@@ -534,6 +652,11 @@ func (m dashboardModel) spendPair(input, output int64) string {
 // viewLog is the scrolling activity feed. It is the only region with history,
 // so it takes whatever height the work list does not need.
 func (m dashboardModel) viewLog() string {
+	if !m.showLog {
+		// Folded away, the feed keeps its count and its place in the frame
+		// and gives its height to the work list.
+		return clip(m.sectionHeading("activity", len(m.log), "press l to expand"), m.width)
+	}
 	heading := m.sectionHeading("activity", len(m.log), logHint(m.paused, m.holding()))
 
 	height := m.logHeight()
@@ -550,18 +673,23 @@ func (m dashboardModel) viewLog() string {
 	if end < 0 {
 		end = 0
 	}
-	start := end - avail
-	if start < 0 {
-		start = 0
+	// The window is counted in lines, not entries: an entry whose text wraps
+	// takes more than one, so the feed is walked back from the tail until
+	// the line budget is spent.
+	wrapped := m.logLines()
+	var rows []string
+	start := end
+	for start > 0 && len(rows) < avail {
+		start--
+		rows = append(append([]string{}, wrapped[start]...), rows...)
 	}
-	rows := make([]string, 0, end-start)
-	for _, e := range m.log[start:end] {
-		rows = append(rows, m.viewLogEntry(e))
+	if len(rows) > avail {
+		rows = rows[len(rows)-avail:]
 	}
 	if len(rows) == 0 {
 		rows = append(rows, m.paint(tuiDimStyle, "  no activity yet"))
 	}
-	rows = m.withScrollbar(rows, start, end, avail)
+	rows = m.withScrollbar(rows, m.logLinesBefore(start), m.logCache.total, avail)
 	return m.clamp(heading, rows, height)
 }
 
@@ -572,12 +700,17 @@ func (m dashboardModel) viewLog() string {
 // The bar is drawn in the last column of the region, so the entries give up
 // that column. A log that fits entirely gets a full-height thumb: there is
 // nothing to scroll, and the bar says so.
-func (m dashboardModel) withScrollbar(rows []string, start, end, avail int) []string {
+//
+// before is how many lines of the feed sit above the window and total is how
+// many the feed has, both counted in lines rather than entries: an entry
+// whose text wraps takes more than one line, and a bar that counted entries
+// would claim the feed is longer than the screen can show.
+func (m dashboardModel) withScrollbar(rows []string, before, total, avail int) []string {
 	if avail < 1 || m.width < 2 {
 		return rows
 	}
 	width := m.width - 1
-	bar := m.scrollbarColumn(start, end, avail)
+	bar := m.scrollbarColumn(before, total, len(rows), avail)
 	for i := range rows {
 		rows[i] = pad(rows[i], width) + bar[i]
 	}
@@ -586,8 +719,7 @@ func (m dashboardModel) withScrollbar(rows []string, start, end, avail int) []st
 
 // scrollbarColumn draws the bar: a thumb whose height is the visible fraction
 // of the feed, sitting at the window's position in it.
-func (m dashboardModel) scrollbarColumn(start, end, avail int) []string {
-	total := len(m.log)
+func (m dashboardModel) scrollbarColumn(before, total, shown, avail int) []string {
 	col := make([]string, avail)
 	for i := range col {
 		col[i] = m.paint(tuiDimStyle, "│")
@@ -599,7 +731,7 @@ func (m dashboardModel) scrollbarColumn(start, end, avail int) []string {
 		}
 		return col
 	}
-	thumb := avail * avail / total
+	thumb := avail * shown / total
 	if thumb < 1 {
 		thumb = 1
 	}
@@ -607,8 +739,8 @@ func (m dashboardModel) scrollbarColumn(start, end, avail int) []string {
 		thumb = avail
 	}
 	pos := 0
-	if total > avail {
-		pos = start * (avail - thumb) / (total - avail)
+	if total > shown {
+		pos = before * (avail - thumb) / (total - shown)
 	}
 	for i := 0; i < thumb; i++ {
 		if pos+i < avail {
@@ -618,12 +750,15 @@ func (m dashboardModel) scrollbarColumn(start, end, avail int) []string {
 	return col
 }
 
-func (m dashboardModel) viewLogEntry(e dashboardLogEntry) string {
-	stamp := m.paint(tuiDimStyle, e.stamp)
-	// One entry is one row. The log region counts entries, not rendered
-	// lines, so an entry whose text carries a newline — a tool output that
-	// spans lines, a warning about an error that does — would render as two
-	// rows and push the rows below the region off the frame.
+// wrapLogEntry lays one activity entry out as the lines it takes.
+//
+// The stamp is a fixed column and the text follows it, so a long line
+// continues under the text rather than under the timestamp: the reader is
+// reading the message, and the message is what should stay in one column.
+func (m dashboardModel) wrapLogEntry(e dashboardLogEntry) []string {
+	// One entry is one row of text. The log region counts lines, so an entry
+	// whose text carries a newline — a tool output that spans lines, a
+	// warning about an error that does — is folded into one line first.
 	text := strings.ReplaceAll(e.text, "\n", " ")
 	var body string
 	switch e.kind {
@@ -634,7 +769,16 @@ func (m dashboardModel) viewLogEntry(e dashboardLogEntry) string {
 	default:
 		body = text
 	}
-	return clip("  "+stamp+"  "+body, m.width)
+	stamp := m.paint(tuiDimStyle, e.stamp)
+	head := "  " + stamp + "  "
+	lines := wrapNote(body, m.width-lipgloss.Width(head), lipgloss.Width(head))
+	if len(lines) == 0 {
+		return []string{clip(head, m.width)}
+	}
+	out := make([]string, 0, len(lines))
+	out = append(out, head+lines[0])
+	out = append(out, lines[1:]...)
+	return out
 }
 
 // helpKeys names the scroll hint after the focused pane: one pair of arrows
@@ -646,9 +790,18 @@ func (m dashboardModel) helpKeys() []string {
 		"tab pane",
 		"↑↓ " + m.focusName(),
 		"c completed",
+		"l " + m.logKeyName(),
 		"p pause log",
 		"ctrl+c cancel",
 	}
+}
+
+// logKeyName is what the key that folds the activity feed does now.
+func (m dashboardModel) logKeyName() string {
+	if m.showLog {
+		return "hide log"
+	}
+	return "show log"
 }
 
 func (m dashboardModel) focusName() string {
@@ -712,6 +865,12 @@ func (m dashboardModel) flexibleRows() int {
 }
 
 func (m dashboardModel) workHeight() int {
+	if !m.showLog {
+		// The feed is folded away, so the work list takes the height the two
+		// of them shared, less the line the folded feed keeps for its
+		// heading.
+		return m.flexibleRows() - 1
+	}
 	rows := m.flexibleRows() / 3
 	if rows < minWorkRows {
 		rows = minWorkRows
@@ -729,6 +888,11 @@ func (m dashboardModel) workHeight() int {
 // did not, and the frame came out one line taller than the terminal, which
 // pushed the help line off the bottom.
 func (m dashboardModel) logHeight() int {
+	if !m.showLog {
+		// One line: the heading that says the feed is there and how to
+		// bring it back.
+		return 1
+	}
 	h := m.flexibleRows() - (m.workHeight() - 1) - 1
 	if h < minLogRows+1 {
 		h = minLogRows + 1
@@ -750,16 +914,33 @@ func (m dashboardModel) finishedFiles() int {
 	return m.reusedFiles + m.doneFiles + m.failedFiles
 }
 
-func (m dashboardModel) nameWidth() int {
-	w := m.width - 12
-	switch {
-	case w < 16:
-		return 16
-	case w > 60:
-		return 60
-	default:
-		return w
+// nameWidth is the width of the name column.
+//
+// It follows the longest name on screen, so a run of short paths leaves the
+// room for the note, and it gives ground to the note when the paths are long:
+// the note is what says what is happening, and a name column that squeezes
+// it to nothing leaves the row saying only which file it is.
+func (m dashboardModel) nameWidth(items []*dashboardItem) int {
+	longest := 0
+	for _, it := range items {
+		if n := lipgloss.Width(it.display()); n > longest {
+			longest = n
+		}
 	}
+	if longest > maxNameWidth {
+		longest = maxNameWidth
+	}
+	room := m.width - 5 - minNoteWidth
+	if room < minNameWidth {
+		room = minNameWidth
+	}
+	if longest > room {
+		longest = room
+	}
+	if longest < minNameWidth {
+		longest = minNameWidth
+	}
+	return longest
 }
 
 func logHint(paused, scrub bool) string {

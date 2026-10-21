@@ -60,6 +60,9 @@ type dashboardItem struct {
 	took        time.Duration
 	findings    int
 	err         string
+	// batch is the group of files this row belongs to, as "2 of 5". It is
+	// empty when the run does not group its work.
+	batch string
 	// inputTokens and outputTokens are what this unit of work has spent,
 	// republished as cumulative totals after every LLM response so the row is
 	// live rather than final. They are kept apart because the header shows
@@ -100,6 +103,46 @@ type dashboardLogEntry struct {
 // dashboardTickMsg drives the spinner and the clock.
 type dashboardTickMsg time.Time
 
+// logWrapCache holds the wrapped lines of the log entries, and the width they
+// were wrapped at.
+type logWrapCache struct {
+	width int
+	lines [][]string
+	// total is how many lines all the entries take. The scrollbar is drawn
+	// from it, so it counts lines rather than entries: an entry whose text
+	// wraps takes more than one line, and a bar that counted entries would
+	// claim the feed is longer than the screen can show.
+	total int
+}
+
+// logLines returns the wrapped lines of the log entries, rebuilding them when
+// the width changed or the cache fell out of step with the log.
+func (m dashboardModel) logLines() [][]string {
+	if m.logCache.width != m.width || len(m.logCache.lines) != len(m.log) {
+		m.logCache.width = m.width
+		m.logCache.lines = make([][]string, len(m.log))
+		m.logCache.total = 0
+		for i, e := range m.log {
+			m.logCache.lines[i] = m.wrapLogEntry(e)
+			m.logCache.total += len(m.logCache.lines[i])
+		}
+	}
+	return m.logCache.lines
+}
+
+// logLinesBefore is how many lines of the feed sit above the given entry.
+func (m dashboardModel) logLinesBefore(entry int) int {
+	lines := m.logLines()
+	if entry > len(lines) {
+		entry = len(lines)
+	}
+	n := 0
+	for i := 0; i < entry; i++ {
+		n += len(lines[i])
+	}
+	return n
+}
+
 // dashboardEventMsg carries a published progress.Event into the Bubble Tea update loop. The
 // pipeline's goroutines send these from outside; Program.Send is documented as
 // safe to call concurrently, which is what makes this the only locking-free
@@ -119,12 +162,22 @@ type dashboardModel struct {
 	byGroup map[string]*dashboardItem
 
 	log []dashboardLogEntry
+	// logCache holds the wrapped lines of the log entries. Wrapping is what
+	// the reader sees, and recomputing it for five hundred entries on every
+	// frame would cost more than the rest of the view put together. It is a
+	// pointer so a render can refresh it: a resize arrives outside the event
+	// stream, and the frame after it has to show the new layout.
+	logCache *logWrapCache
 	// logOffset is how far the visible window has been scrolled back from the
 	// tail. Zero means following.
 	logOffset int
 	// pending counts lines recorded while the log was paused, so releasing the
 	// pause can resume following at the true tail rather than where it was.
 	pending int
+	// showLog is whether the activity feed is open. Folded away, the work list
+	// takes the whole height: a reader watching the rows does not need the
+	// feed, and a reader reading the feed does not need the rows.
+	showLog bool
 
 	totalFiles   int
 	running      int
@@ -134,6 +187,16 @@ type dashboardModel struct {
 	skippedFiles int
 	findings     int
 	budgetHit    bool
+
+	// estInput and estOutput are the run's projected cost, published with the
+	// coverage denominator so the estimate is on screen from the first frame
+	// instead of scrolling away in the log.
+	estInput  int64
+	estOutput int64
+	// strategy names how the work is grouped and groups is how many groups it
+	// is split into. Both are empty for a run that does not group its work.
+	strategy string
+	groups   int
 
 	startedAt time.Time
 	// color mirrors the caller's resolved --color decision. False renders the
@@ -193,6 +256,8 @@ func newDashboardModel(o progressOptions, totalFiles int) dashboardModel {
 		repo:       o.Repo,
 		byGroup:    map[string]*dashboardItem{},
 		focus:      dashboardPaneWork,
+		showLog:    true,
+		logCache:   &logWrapCache{},
 		totalFiles: totalFiles,
 		startedAt:  time.Now(),
 		spinner:    sp,
@@ -224,6 +289,10 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.rawHeight = msg.Height
 		m.width = max(msg.Width, minFrameWidth)
 		m.height = max(msg.Height, minFrameHeight)
+		// The wrapped lines were laid out for the old width, so the cache is
+		// dropped and rebuilt on the next render.
+		m.logCache.width = 0
+		m.logCache.lines = nil
 		return m, nil
 
 	case dashboardTickMsg:
@@ -288,6 +357,18 @@ func (m dashboardModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// outnumber the running ones and push them off the screen.
 		m.showCompleted = !m.showCompleted
 		m.workTop = 0
+		return m, nil
+
+	case "l":
+		// Fold the activity feed away or back out. The work list takes the
+		// height the feed was using, which is what a reader watching the rows
+		// wants; the feed itself is untouched and comes back as it was.
+		m.showLog = !m.showLog
+		if !m.showLog && m.focus == dashboardPaneActivity {
+			// The pane the arrows drive has just gone away, so the focus
+			// moves to the one that is still there.
+			m.focus = dashboardPaneWork
+		}
 		return m, nil
 
 	case "tab", "shift+tab":
@@ -412,6 +493,12 @@ func (m *dashboardModel) apply(ev progress.Event) {
 
 	case progress.KindPlanned:
 		m.totalFiles = ev.Files
+		if ev.Plan != nil {
+			m.estInput = ev.Plan.InputTokens
+			m.estOutput = ev.Plan.OutputTokens
+			m.strategy = ev.Plan.Strategy
+			m.groups = ev.Plan.Groups
+		}
 
 	case progress.KindToolStart:
 		if it := m.lookup(ev.Group); it != nil {
@@ -472,9 +559,47 @@ func (m *dashboardModel) apply(ev progress.Event) {
 		m.pending++
 	}
 	m.log = append(m.log, dashboardLogEntry{stamp: ev.Time.Format("15:04:05"), text: text, kind: ev.Kind})
+	m.cacheLogEntry(m.log[len(m.log)-1])
 	if len(m.log) > dashboardLogRetained {
 		m.log = m.log[len(m.log)-dashboardLogRetained:]
+		m.trimLogCache()
 	}
+}
+
+// cacheLogEntry keeps the wrapped-lines cache in step with the log.
+//
+// A cache laid out for another width is dropped rather than patched: the
+// next render rebuilds it for the width it is about to draw.
+func (m *dashboardModel) cacheLogEntry(e dashboardLogEntry) {
+	if m.logCache.width != m.width {
+		m.logCache.lines = nil
+		m.logCache.width = 0
+		return
+	}
+	lines := m.wrapLogEntry(e)
+	m.logCache.lines = append(m.logCache.lines, lines)
+	m.logCache.total += len(lines)
+}
+
+// trimLogCache drops the wrapped lines of the entries the log dropped.
+func (m *dashboardModel) trimLogCache() {
+	if n := len(m.logCache.lines) - len(m.log); n > 0 {
+		for _, l := range m.logCache.lines[:n] {
+			m.logCache.total -= len(l)
+		}
+		m.logCache.lines = m.logCache.lines[n:]
+	}
+}
+
+// rewrapLogEntry re-wraps one entry, for the collapsed skip rows whose text
+// changes as the run of them grows.
+func (m *dashboardModel) rewrapLogEntry(i int) {
+	if i < 0 || i >= len(m.logCache.lines) || m.logCache.width != m.width {
+		return
+	}
+	old := len(m.logCache.lines[i])
+	m.logCache.lines[i] = m.wrapLogEntry(m.log[i])
+	m.logCache.total += len(m.logCache.lines[i]) - old
 }
 
 // appendSkip adds a skipped file to the activity log, collapsing a run of
@@ -496,16 +621,19 @@ func (m *dashboardModel) appendSkip(ev progress.Event) {
 		if last.kind == progress.KindSkipped && last.reason == reason {
 			last.count++
 			last.text = fmt.Sprintf("Skipping %d file(s) — %s", last.count, reason)
+			m.rewrapLogEntry(n - 1)
 			return
 		}
 	}
-	m.log = append(m.log, dashboardLogEntry{
+	entry := dashboardLogEntry{
 		stamp:  ev.Time.Format("15:04:05"),
 		text:   fmt.Sprintf("Skipping %s — %s", ev.Detail, reason),
 		kind:   progress.KindSkipped,
 		count:  1,
 		reason: reason,
-	})
+	}
+	m.log = append(m.log, entry)
+	m.cacheLogEntry(entry)
 }
 
 // finish closes out a work row and returns how many files it accounts for.
@@ -541,6 +669,9 @@ func (m *dashboardModel) startItem(ev progress.Event) bool {
 		return false
 	}
 	it := &dashboardItem{label: ev.Group, paths: ev.Paths, state: dashboardStateRunning, started: time.Now()}
+	if ev.Plan != nil {
+		it.batch = ev.Plan.Batch
+	}
 	m.byGroup[ev.Group] = it
 	m.items = append(m.items, it)
 	return true

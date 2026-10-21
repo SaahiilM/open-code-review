@@ -16,18 +16,32 @@ import (
 // A scan's unit of work is a single file, so its key is simply the path —
 // there is no grouping step to derive a composite key from.
 
-// publishPlanned reports the run's coverage denominator, published once
-// selection has settled so the dashboard's bar starts at a real total.
-func publishPlanned(files int) {
-	progress.Publish(progress.Event{Kind: progress.KindPlanned, Files: files})
+// publishPlanned reports the run's coverage denominator, its cost estimate
+// and how the work is grouped, published once selection has settled so the
+// dashboard's bar starts at a real total and the estimate is on screen for
+// the whole run.
+func publishPlanned(files int, est Estimate, strategy string, groups int) {
+	progress.Publish(progress.Event{
+		Kind:  progress.KindPlanned,
+		Files: files,
+		Plan: &progress.Plan{
+			InputTokens:  est.InputTokens,
+			OutputTokens: est.OutputTokens,
+			Strategy:     strategy,
+			Groups:       groups,
+		},
+	})
 }
 
-// publishItemStart announces a file entering the concurrent work pool.
-func publishItemStart(it model.ScanItem) {
+// publishItemStart announces a file entering the concurrent work pool. The
+// batch is the group of files the run dispatches together, so the row can say
+// which part of the scan it is working on.
+func publishItemStart(it model.ScanItem, batch string) {
 	progress.Publish(progress.Event{
 		Kind:  progress.KindGroupStart,
 		Group: it.Path,
 		Paths: []string{it.Path},
+		Plan:  &progress.Plan{Batch: batch},
 	})
 }
 

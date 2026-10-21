@@ -93,6 +93,27 @@ const (
 	KindToolError
 )
 
+// Plan describes the shape of a run: what it is estimated to cost, and how
+// the work is grouped.
+//
+// The log says both, but only as lines the reader has to find among the tool
+// calls. The dashboard shows them where the run is being watched: the estimate
+// on a line of its own, and the batch beside each row.
+type Plan struct {
+	// InputTokens and OutputTokens are the run's estimated token cost. The
+	// estimate is a floor — agent tool use multiplies the prompt — so it is
+	// shown as what it is.
+	InputTokens  int64
+	OutputTokens int64
+	// Strategy names how the work is grouped — "by-language", "by-directory" —
+	// and Groups is how many groups it is split into.
+	Strategy string
+	Groups   int
+	// Batch is the group an item belongs to, as "2 of 5". It is empty when
+	// the work is not grouped.
+	Batch string
+}
+
 // Event is one thing the run wants to say. Text is the already-formatted
 // message: the text sink prints it verbatim (after the prefix) and the TUI
 // shows it in the activity log, so neither sink has to re-derive the wording
@@ -123,6 +144,9 @@ type Event struct {
 	// a run of identical reasons into one row. The text sink ignores it: the
 	// per-file lines are printed by the caller.
 	SkipReason string
+	// Plan carries the run's shape when the event has one: the token estimate
+	// and the batch the work belongs to.
+	Plan *Plan
 	// InputTokens and OutputTokens are what one group has spent so far. For
 	// Anthropic, InputTokens already includes cache read and write tokens, so
 	// adding those on top here would double-count them.

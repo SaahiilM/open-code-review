@@ -34,7 +34,7 @@ func captureProgress(t *testing.T, fn func()) []progress.Event {
 }
 
 func TestPublishPlannedSetsTheCoverageDenominator(t *testing.T) {
-	got := captureProgress(t, func() { publishPlanned(7) })
+	got := captureProgress(t, func() { publishPlanned(7, Estimate{InputTokens: 300, OutputTokens: 40}, "by-language", 5) })
 
 	if len(got) != 1 {
 		t.Fatalf("expected 1 event, got %d", len(got))
@@ -45,12 +45,23 @@ func TestPublishPlannedSetsTheCoverageDenominator(t *testing.T) {
 	if got[0].Files != 7 {
 		t.Errorf("files = %d, want 7", got[0].Files)
 	}
+	if got[0].Plan == nil {
+		t.Fatal("the event carries no plan, so the dashboard has no estimate to show")
+	}
+	if got[0].Plan.InputTokens != 300 || got[0].Plan.OutputTokens != 40 {
+		t.Errorf("plan tokens = %d in / %d out, want 300 in / 40 out",
+			got[0].Plan.InputTokens, got[0].Plan.OutputTokens)
+	}
+	if got[0].Plan.Strategy != "by-language" || got[0].Plan.Groups != 5 {
+		t.Errorf("plan = %q over %d groups, want by-language over 5",
+			got[0].Plan.Strategy, got[0].Plan.Groups)
+	}
 }
 
 func TestPublishItemLifecycle(t *testing.T) {
 	it := model.ScanItem{Path: "a.go"}
 
-	start := captureProgress(t, func() { publishItemStart(it) })
+	start := captureProgress(t, func() { publishItemStart(it, "2 of 5") })
 	if len(start) != 1 {
 		t.Fatalf("expected 1 event, got %d", len(start))
 	}
@@ -59,6 +70,9 @@ func TestPublishItemLifecycle(t *testing.T) {
 	}
 	if start[0].Group != "a.go" {
 		t.Errorf("group = %q, want the item's path", start[0].Group)
+	}
+	if start[0].Plan == nil || start[0].Plan.Batch != "2 of 5" {
+		t.Errorf("batch = %v, want \"2 of 5\"", start[0].Plan)
 	}
 
 	done := captureProgress(t, func() { publishItemDone(it, 3) })
